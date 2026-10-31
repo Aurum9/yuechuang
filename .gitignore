@@ -1,0 +1,40 @@
+node_modules/
+.npm-cache/
+.browsers/
+.cache/
+.test-profile*/
+test-results/
+*.log
+helper/.gocache/
+helper/.gotmp/
+helper/credentials.bin
+helper/credentials.lock
+
+# Generated builds and local release archives are distributed separately.
+/dist/
+/release/
+/helper-release/
+/helper/bin/
+
+# Raw local screenshots and diagnostics are kept out of the public repository.
+/docs/验收证据/
+/scripts/siwc-live-diagnostic.mjs
+
+# Local credentials and machine-specific configuration.
+.env
+.env.*
+!.env.example
+credentials.bin
+credentials.lock
+helper-config.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor and OS metadata.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.tsbuildinfo

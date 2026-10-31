@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>Local ChatGPT webpage fixture</title><style>
+body{font:16px sans-serif;margin:24px;max-width:760px} [contenteditable]{min-height:54px;border:1px solid #bbb;padding:8px} [data-user-message-bubble]{background:#eee;padding:10px;margin:8px} [data-markdown-text-style]{padding:12px} button{padding:8px;margin:4px}
+</style></head><body><header>ChatGPT · 本地浏览器测试页面</header><main id="turns"></main>
+<form id="composer"><div contenteditable="true" role="textbox" aria-label="询问 ChatGPT"></div><button type="button" aria-label="发送" disabled>发送</button></form>
+<script>
+(() => {
+  const state = window.fixture = { mode:'normal', sends:[], stops:0, turn:0, delay:320, cid:'', nextText:'网页回答', completed:0 };
+  const editor=document.querySelector('[role="textbox"]'), send=document.querySelector('button[aria-label="发送"]'), turns=document.querySelector('#turns');
+  editor.addEventListener('input', () => { send.disabled=!editor.innerText.trim(); });
+  send.addEventListener('click', () => {
+    const prompt=editor.innerText;
+    if (!prompt.trim()) return;
+    state.sends.push(prompt); state.turn++;
+    editor.textContent=''; send.disabled=true;
+    const turn=document.createElement('div'); turn.setAttribute('data-talvt-turn-state','streaming');
+    const user=document.createElement('div'); user.setAttribute('data-content-search-unit-key',`fallback-turn-${state.turn}:0:user`); user.setAttribute('data-chatgpt-search-message-ids',`u-${state.turn}`);
+    const bubble=document.createElement('div'); bubble.setAttribute('data-user-message-bubble','true'); const text=document.createElement('div'); text.setAttribute('dir','auto'); text.setAttribute('data-search-result-target',''); text.textContent=prompt; bubble.append(text); user.append(bubble); turn.append(user); turns.append(turn);
+    state.cid ||= 'fixture-'+crypto.randomUUID();
+    history.pushState({}, '', '/c/'+state.cid);
+    const stop=document.createElement('button'); stop.type='button'; stop.setAttribute('aria-label','停止'); stop.textContent='停止'; document.querySelector('#composer').append(stop);
+    let stopped=false;
+    stop.addEventListener('click',()=>{state.stops++; stopped=true; stop.remove(); turn.setAttribute('data-talvt-turn-state','stopped');});
+    if (state.mode==='noAssistant') return;
+    const selection=document.createElement('div'); selection.setAttribute('data-chatgpt-selection-message-id',`a-${state.turn}`); selection.setAttribute('data-chatgpt-selection-conversation-id',state.cid);
+    const answer=document.createElement('div'); answer.setAttribute('data-markdown-text-style','assistant-message');
+    const copyContents=document.createElement('div'); copyContents.setAttribute('data-markdown-copy','contents'); copyContents.setAttribute('data-dil-source-message-id',`a-${state.turn}`); copyContents.innerHTML='<p data-d-component="text">正在回答</p>'; answer.append(copyContents); selection.append(answer); turn.append(selection);
+    const finalAnswer=()=> { if(stopped) return; copyContents.innerHTML='<h2>说明</h2><p data-d-component="text"><strong>'+state.nextText+'</strong></p><p data-d-component="text">本轮 '+state.turn+'。</p><pre><code>const answer = 42;</code></pre>'; };
+    if(state.mode==='fast') { finalAnswer(); stop.remove(); turn.setAttribute('data-talvt-turn-state','complete'); state.completed++; return; }
+    setTimeout(finalAnswer,70);
+    if(state.mode==='hang') return;
+    setTimeout(()=>{ if(stopped) return; stop.remove(); turn.setAttribute('data-talvt-turn-state','complete'); state.completed++; const copy=document.createElement('button'); copy.type='button'; copy.setAttribute('aria-label','复制'); copy.textContent='复制'; turn.append(copy); },state.delay);
+  });
+})();
+</script></body></html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>阅读助手 · 跨页研究</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="masthead">
+        <a class="brand" href="options.html"><span class="brand-mark" aria-hidden="true">阅</span><span>阅读助手<span class="brand-caption">个人阅读工具</span></span></a>
+        <nav aria-label="阅读工具"><a href="phrases.html">词句收藏</a><a href="options.html">返回设置 ↗</a></nav>
+      </header>
+
+      <section class="intro" aria-labelledby="page-title"><div><p class="eyebrow">逐页阅读 · 带着出处回答</p><h1 id="page-title">把几篇资料，放在一起看。</h1><p>给出一个问题和文档链接，逐页整理证据，再比较其中的异同。</p></div><span class="local-badge">仅在本机保存</span></section>
+      <div id="feedback" class="feedback" role="status" aria-live="polite" hidden></div>
+
+      <section class="setup-card" aria-labelledby="setup-title">
+        <form id="research-form" novalidate>
+          <div class="section-heading"><div><p class="eyebrow">开始一次研究</p><h2 id="setup-title">你想比较什么？</h2></div><span class="step-badge">1—5 篇文档</span></div>
+          <label for="question">研究问题 <span id="question-count">0 / 1,500</span></label>
+          <textarea id="question" maxlength="1500" rows="3" placeholder="例如：比较这些文档如何处理背压，列出实现差异和适用场景。" aria-describedby="question-hint"></textarea>
+          <p id="question-hint" class="field-hint">问题越具体，资料之间的比较越有帮助。</p>
+          <label for="urls">文档链接 <span id="url-count">每行一个</span></label>
+          <textarea id="urls" rows="5" spellcheck="false" placeholder="https://example.com/docs/first&#10;https://example.com/docs/second" aria-describedby="urls-hint"></textarea>
+          <p id="urls-hint" class="field-hint">支持 HTTPS 网页及本机 HTTP；请填写文章或文档的完整地址。</p>
+          <div class="setup-actions"><button id="authorize" type="button" class="button button-secondary">授权所填网站</button><button id="start-research" type="submit" class="button button-primary" disabled>开始研究 <span aria-hidden="true">→</span></button></div>
+          <p id="ready-state" class="ready-state" role="status" aria-live="polite">正在检查配置…</p>
+        </form>
+        <aside class="scope-note" aria-label="研究范围"><span class="scope-mark" aria-hidden="true">阅</span><h3>让资料说得清楚</h3><ol><li>依次打开临时阅读标签，读取后关闭。</li><li>每篇提取与问题有关的要点和原文引句。</li><li>汇总比较，点击引用即可核对出处。</li></ol><p>每次任务最多调用模型 <strong>6 次</strong>。请保持此任务页打开；关闭页面会停止任务。</p><p>需要分析的网页正文会发送到你配置的模型接口。任务结束后，可手动保存报告到本机。</p><a href="options.html">配置模型与 Key ↗</a></aside>
+      </section>
+
+      <section id="active-monitor" class="active-monitor" aria-label="当前任务进度" hidden><div><span id="active-state" class="status-badge">研究中</span><p id="active-stage"></p></div><div class="monitor-actions"><button id="view-current" class="button button-secondary" type="button">查看当前任务</button><button id="stop-research" class="button button-danger-outline" type="button">停止任务</button></div></section>
+
+      <div class="workspace">
+        <section id="task-panel" class="task-panel" aria-label="研究结果">
+          <div id="task-empty" class="empty-state"><span class="empty-mark" aria-hidden="true">研</span><h2>从一个问题开始</h2><p>填入资料链接，完成网站授权后开始研究。报告和证据会在这里逐步出现。</p></div>
+          <div id="task-content" hidden>
+            <div class="result-header"><div><p id="view-label" class="eyebrow">当前任务</p><h2 id="task-question"></h2></div><span id="task-status" class="status-badge"></span></div>
+            <div class="task-meta"><p id="task-stage" role="status" aria-live="polite"></p><span id="call-count"></span></div>
+            <p id="task-error" class="task-error" role="alert" hidden></p>
+            <section id="report-section" class="report-section" aria-labelledby="report-title"><div class="subheading"><h3 id="report-title">研究报告</h3><span id="report-caption"></span></div><div id="report"></div><div class="report-actions"><button id="save-report" class="button button-primary" type="button" disabled>保存报告到本机</button><button id="export-report" class="button button-secondary" type="button" disabled>导出 Markdown</button></div></section>
+            <section class="sources-section" aria-labelledby="sources-title"><div class="subheading"><h3 id="sources-title">来源与原文证据</h3><span>点击报告引用，核对原文</span></div><div id="sources" class="sources"></div></section>
+          </div>
+        </section>
+
+        <aside class="history-panel" aria-labelledby="history-title"><div class="history-heading"><div><p class="eyebrow">留在这台电脑</p><h2 id="history-title">已存报告</h2></div><button id="refresh-reports" type="button" class="plain-button">刷新 ↻</button></div><p id="saved-count" class="history-description">正在读取…</p><div id="saved-reports"></div><p id="saved-empty" class="history-empty" hidden>还没有保存的报告。研究完成后，点击「保存报告到本机」。</p><p class="history-limit">最多保存 20 份，总计 1.5 MiB。可以导出 Markdown 留存。</p></aside>
+      </div>
+      <footer>阅读助手 <span aria-hidden="true">/</span> 研究记录仅存本机 <span aria-hidden="true">/</span> 无云同步</footer>
+    </main>
+
+    <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description"><form id="delete-form"><p class="eyebrow">删除报告</p><h2 id="delete-title">删除这份本机报告？</h2><p id="delete-description">删除后无法撤销，可先导出 Markdown。</p><blockquote id="delete-text"></blockquote><p id="delete-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-delete" type="button" class="button button-secondary">保留报告</button><button id="confirm-delete" type="submit" class="button button-danger">确认删除</button></div></form></dialog>
+    <script type="module" src="/src/research-page.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,440 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { startFixtures } from './fixtures/server.mjs';
+import { hashDirectory, buildFingerprint } from '../scripts/artifact-hashes.mjs';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const output = path.join(root, 'test-results');
+const screenshots = path.join(output, 'context-0.9.1');
+await fs.mkdir(screenshots, { recursive: true });
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  for (const directory of ['.cache/ms-playwright', '.browsers']) {
+    const candidate = path.join(root, directory);
+    try { if ((await fs.readdir(candidate)).some(name => name.startsWith('chromium-'))) { process.env.PLAYWRIGHT_BROWSERS_PATH = candidate; break; } } catch {}
+  }
+}
+const { chromium } = await import('playwright');
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+async function until(predicate, message, timeout = 12000) {
+  const started = Date.now(); let last;
+  while (Date.now() - started < timeout) {
+    try { const value = await predicate(); if (value) return value; } catch (error) { last = error; }
+    await sleep(60);
+  }
+  throw new Error(message + (last ? `: ${last.message}` : ''));
+}
+function assertTestDirectory(directory) {
+  const actual = path.resolve(directory), allowed = path.resolve(output);
+  assert.ok(actual !== allowed && actual.startsWith(allowed + path.sep), 'refusing to clean outside test-results');
+}
+const testedFiles = await hashDirectory(path.join(root, 'dist'));
+const productionManifest = await fs.readFile(path.join(root, 'dist/manifest.json'), 'utf8');
+const manifest = JSON.parse(productionManifest);
+assert.equal(manifest.version, '0.9.1', 'Build M2 0.9.1 before running context e2e');
+assert.ok(manifest.permissions.includes('contextMenus'));
+const report = {
+  mockOnly: true, realModelVerified: false, nativeMenuSelectionVerified: false,
+  extensionVersion: manifest.version, date: new Date().toISOString(), checks: [], network: [],
+  testedBuild: { fingerprint: buildFingerprint(testedFiles), files: testedFiles, unchangedAfterTest: false },
+  testHarness: {
+    toolbarFlowProductionWorker: false,
+    toolbarUsesProductionWorkerWithoutTestEntry: false,
+    toolbarTrustedMouseOrKeyboard: true, toolbarSyntheticClickRejected: false,
+    nativeMenuCallbackInstrumented: false, trustedNativeContextMenuEvent: false,
+    productionSourceModified: false, testCopyRestored: false,
+    permissionBootstrap: 'Temporary test-copy manifest grants loopback, followed by production manifest restoration and extension reload.'
+  },
+  coverage: { automaticToolbarZeroRequests: false, oneClickTranslation: false, mainAndPreviewFrames: false, bilingualPairs: false, usageExamples: false, longTranslationNoExamples: false, selectionLifecycle: false, m1DragSmoke: false },
+  notes: [
+    'Toolbar cases use real mouse/keyboard selection and real button clicks in a production worker with no test entry. Programmatic selection and DOM.click are separate negative controls.',
+    'Only supplemental native-menu cases instrument a temporary worker copy to invoke its registered onClicked listener after a trusted contextmenu event. Native menu item selection remains manual.',
+    'All model responses are deterministic local mock SSE. These checks verify data flow, cancellation, prompts and UI partitions; actual model answer quality remains unverified.',
+    'Existing 0.3.0 reports and screenshots are preserved; this report and context-0.9.1 screenshots are separate.'
+  ]
+};
+const fixtures = await startFixtures({ port: Number(process.env.FIXTURE_PORT || 4327) });
+report.fixtureOrigin = fixtures.origin;
+const profile = await fs.mkdtemp(path.join(output, 'context-0.9.1-profile-'));
+assertTestDirectory(profile);
+const testExtension = path.join(profile, 'test-extension');
+assertTestDirectory(testExtension);
+const fakeKey = 'm2-local-mock-key-do-not-use-with-real-service';
+let context, options, source, worker, extensionId, fatal, productionBackground, manifestPath, backgroundPath, nativeProfile;
+const host = frame => frame.locator('local-reader-context');
+const toolbar = frame => frame.locator('local-reader-selection-toolbar');
+const tool = (frame, name) => toolbar(frame).locator(`[data-selection-action="${name}"]`);
+const panel = frame => host(frame).locator('.panel');
+const status = frame => host(frame).locator('.status[data-phase]');
+const answer = frame => host(frame).locator('[data-context-output]');
+const core = frame => host(frame).locator('[data-context-core]');
+const details = frame => host(frame).locator('[data-context-details]');
+const action = (frame, name) => host(frame).locator(`[data-context-action="${name}"]`);
+const stats = () => fixtures.getStats();
+const count = () => stats().count;
+const latest = () => stats().requests.at(-1);
+const input = () => JSON.parse(latest().body.messages[1].content);
+const prompt = () => latest().body.messages[0].content;
+async function check(name, operation, pathKind = 'production-toolbar') {
+  const started = Date.now(), before = stats().totalRequestsSinceStart;
+  try {
+    const evidence = await operation(); const after = stats().totalRequestsSinceStart;
+    report.checks.push({ name, path: pathKind, result: 'pass', milliseconds: Date.now() - started, requestsBefore: before, requestsAfter: after, newRequests: after - before, ...(evidence ? { evidence } : {}) });
+    process.stdout.write(`PASS ${name}\n`);
+  } catch (error) {
+    const after = stats().totalRequestsSinceStart;
+    report.checks.push({ name, path: pathKind, result: 'fail', milliseconds: Date.now() - started, requestsBefore: before, requestsAfter: after, newRequests: after - before, error: error.message });
+    process.stdout.write(`FAIL ${name}: ${error.message}\n`);
+    await source?.screenshot({ path: path.join(screenshots, `failure-${report.checks.length}.png`) }).catch(() => {});
+  }
+}
+async function settings(model = 'normal', key) {
+  await options.bringToFront(); await until(() => options.locator('#save-settings').isEnabled(), 'settings unavailable');
+  await options.locator('#base-url').fill(fixtures.origin + '/v1'); await options.locator('#model').fill(model);
+  await options.locator('#auto-summary').setChecked(false); await options.locator('#remember-key').setChecked(false);
+  await options.locator('#input-budget').fill('16000'); await options.locator('#auto-long-summary').setChecked(false);
+  if (key !== undefined) await options.locator('#api-key').fill(key);
+  await options.locator('#save-settings').click();
+  await until(async () => await options.locator('#save-settings').isEnabled() && (await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).settings.model === model, 'settings save did not complete');
+}
+async function gotoContext(foreign = false) {
+  await source.bringToFront(); await source.goto(fixtures.origin + (foreign ? '/context-foreign' : '/context-tech'));
+  await source.locator(foreign ? '#term-foreign' : '#term-a').waitFor(); await sleep(180); return source;
+}
+async function selected(frame) { return frame.evaluate(() => getSelection()?.toString() || ''); }
+async function realSelect(frame, selector, { paragraph = false, keyboard = false, allowEmpty = false } = {}) {
+  await source.bringToFront(); const term = frame.locator(selector); await term.scrollIntoViewIfNeeded();
+  // Deliver the scrolling caused by locating an off-screen target before the
+  // trusted selection gesture. A late event would correctly dismiss that UI.
+  await frame.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const box = await term.boundingBox(); assert.ok(box, 'selectable target missing: ' + selector);
+  const x = box.x + Math.min(box.width / 2, 70), y = box.y + Math.min(box.height / 2, 14);
+  if (paragraph) await source.mouse.click(x, y, { clickCount: 3 });
+  else await source.mouse.dblclick(x, y);
+  if (keyboard) { await source.keyboard.press('ArrowLeft'); await source.keyboard.press('Control+Shift+ArrowRight'); }
+  const text = await selected(frame); if (!allowEmpty) assert.ok(text.trim(), 'real mouse/keyboard did not select text');
+  return text;
+}
+async function selectToolbar(frame, selector, options = {}) {
+  const before = count(), text = await realSelect(frame, selector, options);
+  await toolbar(frame).waitFor({ state: 'visible' });
+  await sleep(120); assert.equal(count(), before, 'showing toolbar must make zero API requests');
+  return text;
+}
+async function clickToolbar(frame, mode = 'explain') {
+  const text = await selected(frame), previous = await host(frame).count() ? await panel(frame).getAttribute('data-request-id') : undefined;
+  await tool(frame, mode).click();
+  assert.equal(await selected(frame), text, 'toolbar click must preserve the real selection');
+  await until(async () => await host(frame).count() === 1 && await panel(frame).getAttribute('data-request-id') !== previous, 'context answer did not open');
+  return { selectedText: text, requestId: await panel(frame).getAttribute('data-request-id') };
+}
+async function selectAndInvoke(frame, selector, mode = 'explain', options = {}) {
+  await selectToolbar(frame, selector, options); return clickToolbar(frame, mode);
+}
+async function completed(frame, timeout = 12000) {
+  await until(async () => ['done', 'error', 'cancelled', 'interrupted'].includes(await status(frame).getAttribute('data-phase')), 'context response did not finish', timeout);
+  assert.equal(await status(frame).getAttribute('data-phase'), 'done', await status(frame).innerText()); return answer(frame).innerText();
+}
+async function expand(frame) {
+  const previous = await panel(frame).getAttribute('data-request-id'); await action(frame, 'expand').click();
+  await until(async () => await panel(frame).getAttribute('data-request-id') !== previous, 'expanded response did not replace request');
+  return completed(frame);
+}
+async function closeAnswer(frame) {
+  if (await host(frame).count()) { await action(frame, 'close').click(); await host(frame).waitFor({ state: 'detached' }); }
+}
+async function inViewport(locator) {
+  const bounds = await locator.evaluate(node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: innerWidth, height: innerHeight }; });
+  assert.ok(bounds.left >= 0 && bounds.right <= bounds.width + 1 && bounds.top >= 0 && bounds.bottom <= bounds.height + 1, JSON.stringify(bounds));
+  return bounds;
+}
+async function dragPreview(linkId, expectedPath) {
+  await source.bringToFront(); const link = source.locator('#' + linkId); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox(); assert.ok(box);
+  await source.mouse.move(box.x + Math.min(30, box.width / 3), box.y + box.height / 2); await source.mouse.down(); await source.mouse.move(box.x + 95, box.y + box.height / 2 + 22, { steps: 14 });
+  await until(async () => (await source.locator('local-reader-preview iframe').getAttribute('src'))?.includes(expectedPath), 'M1 preview iframe did not open');
+  assert.equal(await source.locator('local-reader-preview').isVisible(), true, 'M1 preview must appear before mouseup'); await source.mouse.up();
+  await until(async () => await source.locator('local-reader-preview .page-status').getAttribute('data-state') === 'ready', 'M1 target frame not ready', 18000);
+  const handle = await source.locator('local-reader-preview iframe').elementHandle(); const frame = await handle.contentFrame(); assert.ok(frame); return frame;
+}
+async function reloadTestCopy({ nativeHarness = false, grantLoopback = false } = {}) {
+  const harness = ';(()=>{const handlers=[];globalThis.__contextE2EHandlers=handlers;const add=chrome.contextMenus.onClicked.addListener.bind(chrome.contextMenus.onClicked);chrome.contextMenus.onClicked.addListener=(listener)=>{handlers.push(listener);add(listener)};globalThis.__contextE2EDispatch=(info,tab)=>{for(const listener of handlers)listener(info,tab);return handlers.length}})();\n';
+  await fs.writeFile(backgroundPath, nativeHarness ? harness + productionBackground : productionBackground);
+  await fs.writeFile(manifestPath, grantLoopback ? JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }) : productionManifest);
+  const browserSettings = await context.newPage(); await browserSettings.goto('chrome://extensions');
+  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
+  await browserSettings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
+  worker = await until(async () => {
+    for (const candidate of context.serviceWorkers()) {
+      try {
+        if (new URL(candidate.url()).hostname !== extensionId) continue;
+        const ready = await candidate.evaluate(instrumented => instrumented ? globalThis.__contextE2EHandlers?.length > 0 : typeof globalThis.__contextE2EDispatch === 'undefined', nativeHarness);
+        if (ready) return candidate;
+      } catch {}
+    }
+  }, 'reloaded worker unavailable');
+  await fs.writeFile(manifestPath, productionManifest); await fs.writeFile(backgroundPath, productionBackground);
+  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
+  await browserSettings.close();
+  if (!nativeHarness && grantLoopback) await reloadTestCopy();
+}
+async function nativeInvoke(frame, selector, mode = 'explain', { clearAfterMenu = false, textOverride } = {}) {
+  await source.bringToFront();
+  await frame.evaluate(() => {
+    window.__contextMenuEvents = [];
+    document.addEventListener('contextmenu', event => window.__contextMenuEvents.push({ trusted: event.isTrusted, text: getSelection()?.toString() || '' }), true);
+  });
+  const text = selector ? await realSelect(frame, selector) : textOverride || '';
+  const target = frame.locator(selector || '#ctx-empty'); const box = await target.boundingBox();
+  await source.mouse.click(box.x + Math.min(box.width / 2, 60), box.y + Math.min(box.height / 2, 12), { button: 'right' });
+  await until(() => frame.evaluate(() => window.__contextMenuEvents.at(-1)?.trusted), 'trusted native contextmenu event missing');
+  if (clearAfterMenu) await frame.evaluate(() => getSelection()?.removeAllRanges());
+  assert.equal(count(), 0, 'native context menu and capture must not make any API request before the explicit menu action');
+  const tab = await options.evaluate(async url => (await chrome.tabs.query({})).find(candidate => candidate.url === url), source.url()); assert.ok(tab?.id);
+  const browserFrame = await options.evaluate(async ({ tabId, url }) => (await chrome.webNavigation.getAllFrames({ tabId })).find(candidate => candidate.url === url), { tabId: tab.id, url: frame.url() }); assert.ok(browserFrame?.documentId);
+  const info = { menuItemId: mode === 'translate' ? 'contextual-translate' : 'contextual-explain', selectionText: textOverride ?? text, editable: false, frameId: browserFrame.frameId, pageUrl: source.url(), ...(browserFrame.frameId ? { frameUrl: frame.url() } : {}) };
+  assert.ok(await worker.evaluate(({ info, tab }) => globalThis.__contextE2EDispatch(info, tab), { info, tab }) >= 1);
+  await until(async () => await host(frame).count() === 1, 'native callback did not show UI'); return text;
+}
+
+try {
+  context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${path.join(root, 'dist')}`, `--load-extension=${path.join(root, 'dist')}`, '--no-first-run'] });
+  context.setDefaultTimeout(8000); worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
+  report.browser = context.browser().version();
+  options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'initial settings unavailable');
+  source = await context.newPage(); await source.goto(fixtures.origin + '/context-tech');
+  await check('0.9.1 initial optional permission boundary', async () => {
+    assert.deepEqual((await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).permissions, []);
+    await realSelect(source, '#term-a'); await sleep(200); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
+  });
+  await context.close();
+  await fs.cp(path.join(root, 'dist'), testExtension, { recursive: true });
+  manifestPath = path.join(testExtension, 'manifest.json'); backgroundPath = path.join(testExtension, manifest.background.service_worker);
+  productionBackground = await fs.readFile(backgroundPath, 'utf8');
+  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
+  context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'] });
+  context.setDefaultTimeout(8000); context.on('request', request => { if (request.url().startsWith('http')) report.network.push({ method: request.method(), url: request.url() }); });
+  worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
+  await reloadTestCopy();
+  assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined'); report.testHarness.toolbarUsesProductionWorkerWithoutTestEntry = true; report.testHarness.toolbarFlowProductionWorker = true;
+  options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'production settings unavailable');
+  assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*', 'http://localhost/*'] })), true);
+  await settings('normal', fakeKey); source = await context.newPage(); await gotoContext();
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixtures.origin }); report.extensionId = extensionId;
+
+  await check('0.9.1 programmatic selection alone creates no toolbar or API call', async () => {
+    fixtures.reset(); await source.locator('#term-a').selectText(); await sleep(250); assert.equal(await selected(source), 'coherence');
+    assert.equal(await toolbar(source).count(), 0); assert.equal(await host(source).count(), 0); assert.equal(count(), 0);
+    await source.evaluate(() => getSelection()?.removeAllRanges());
+  });
+  await check('0.9.1 trusted selection shows compact toolbar with zero API; DOM.click has no effect', async () => {
+    await gotoContext(true); fixtures.reset(); assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
+    for (const name of ['translate', 'explain', 'close']) await tool(source, name).evaluate(node => node.click());
+    await sleep(200); assert.equal(count(), 0); assert.equal(await host(source).count(), 0); assert.equal(await toolbar(source).isVisible(), true);
+    assert.equal((await selected(source)).trim(), 'resilience'); report.testHarness.toolbarSyntheticClickRejected = true;
+    await inViewport(toolbar(source).locator('.toolbar')); await toolbar(source).locator('.toolbar').screenshot({ path: path.join(screenshots, 'toolbar-desktop.png') });
+  });
+  await check('0.9.1 translate click makes exactly one request and preserves the real selection', async () => {
+    await clickToolbar(source, 'translate'); assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(count(), 1);
+    assert.equal(latest().contextMode, 'translate'); assert.equal(input().selection.trim(), 'resilience'); assert.equal((await selected(source)).trim(), 'resilience');
+    assert.match(prompt(), /完整译|完整翻译/); assert.match(input().paragraphContext, /FOREIGN_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /FOREIGN_NEAR_AFTER_SENTINEL/);
+    assert.doesNotMatch(JSON.stringify(latest().body), /CONTEXT_FORM_SECRET|CONTEXT_HIDDEN_SECRET|GLOBAL_NAV_NO_CONTEXT_SECRET/);
+    assert.match(await core(source).innerText(), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(await details(source).isVisible(), false); assert.equal(await action(source, 'expand').innerText(), '双语例句');
+    await panel(source).screenshot({ path: path.join(screenshots, 'translate-core-desktop.png') });
+  });
+  await check('0.9.1 short-English expansion has 1–2 actual English/Chinese pairs in a separate section', async () => {
+    const before = await core(source).innerText(); await expand(source); assert.equal(count(), 2); assert.equal(latest().contextAnswerKind, 'details');
+    assert.match(prompt(), /1.?2|一.?两|1—2/); assert.match(prompt(), /英文|英语/); assert.match(prompt(), /中文/); assert.match(input().existingCoreAnswer, /CONTEXT_TRANSLATION_OUTPUT/);
+    assert.equal(await core(source).innerText(), before); const examples = await details(source).innerText();
+    assert.match(examples, /The wetland showed resilience after the drought\.\s*这片湿地在干旱后展现了恢复能力。/);
+    assert.match(examples, /The system needs resilience when a server fails\.\s*服务器发生故障时，系统需要具备恢复能力。/);
+    assert.equal((examples.match(/^\d\./gm) || []).length, 2); await panel(source).screenshot({ path: path.join(screenshots, 'translate-examples-desktop.png') });
+  });
+  await check('0.9.1 technical explanation retains nearby context and explicit usage example partition', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1); assert.equal(latest().contextMode, 'explain');
+    assert.match(input().paragraphContext, /CONTEXT_A_NEAR_SENTINEL/); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_AFTER_SENTINEL/);
+    assert.equal(await action(source, 'expand').innerText(), '用法示例'); const before = await core(source).innerText(); await expand(source); assert.equal(count(), 2);
+    assert.match(prompt(), /情境|例子|示例/); assert.match(prompt(), /代码/); assert.equal(await core(source).innerText(), before); assert.match(await details(source).innerText(), /最小代码：const fresh = cached.version === latestVersion;/);
+    await panel(source).screenshot({ path: path.join(screenshots, 'explain-usage-desktop.png') });
+    await action(source, 'copy').click(); const copied = (await source.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'); assert.ok(copied.includes(before)); assert.match(copied, /最小代码/);
+  });
+  await check('0.9.1 result controls ignore synthetic page clicks', async () => {
+    const before = count(), oldId = await panel(source).getAttribute('data-request-id');
+    for (const name of ['retry', 'expand', 'stop', 'close']) await action(source, name).evaluate(node => node.click());
+    await sleep(180); assert.equal(count(), before); assert.equal(await panel(source).getAttribute('data-request-id'), oldId); assert.equal(await status(source).getAttribute('data-phase'), 'done');
+  });
+  await check('0.9.1 long paragraph translation sends the complete selection and hides unrelated example action', async () => {
+    await gotoContext(true); fixtures.reset(); const text = await selectToolbar(source, '#ctx-long-foreign', { paragraph: true }); assert.ok(text.length > 240);
+    await clickToolbar(source, 'translate'); await completed(source); assert.equal(count(), 1); assert.equal(input().selection.trim(), text.trim()); assert.match(input().selection, /LONG_ENGLISH_CONTEXT_SENTINEL/);
+    assert.equal(await action(source, 'expand').isVisible(), false); assert.equal(await details(source).isVisible(), false); await panel(source).screenshot({ path: path.join(screenshots, 'translate-long-no-examples.png') });
+  });
+  await check('0.9.1 keyboard selection completion shows toolbar without a request', async () => {
+    await gotoContext(); fixtures.reset(); const text = await selectToolbar(source, '#term-a', { keyboard: true }); assert.match(text, /coherence/); assert.equal(count(), 0);
+    await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' }); assert.equal(count(), 0);
+  });
+  await check('0.9.1 close, new selection, blank click and page scroll clear transient UI without requests', async () => {
+    await gotoContext(); fixtures.reset(); await selectToolbar(source, '#term-a'); await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' });
+    await selectToolbar(source, '#term-a'); await selectToolbar(source, '#term-b'); assert.equal((await selected(source)).trim(), 'microtasks');
+    await source.locator('#ctx-empty').click(); await until(async () => await toolbar(source).count() === 0 && await host(source).count() === 0, 'blank click did not dismiss UI');
+    await selectToolbar(source, '#term-a'); await source.evaluate(() => getSelection()?.removeAllRanges()); await until(async () => await toolbar(source).count() === 0, 'disappeared selection left toolbar visible');
+    await selectToolbar(source, '#term-a'); await source.mouse.wheel(0, 250); await until(async () => await toolbar(source).count() === 0, 'page scroll left toolbar visible'); assert.equal(count(), 0);
+  });
+  await check('0.9.1 input, password, editable and form selections never show a toolbar', async () => {
+    fixtures.reset();
+    for (const selector of ['#ctx-input', '#ctx-password', '#term-editor', '#term-form']) {
+      await gotoContext(); await realSelect(source, selector, { allowEmpty: true }); await sleep(180);
+      assert.equal(await toolbar(source).count(), 0, selector); assert.equal(await host(source).count(), 0, selector); assert.equal(count(), 0, selector);
+    }
+  });
+  await check('0.9.1 selecting the answer itself never opens another toolbar or pays again', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await completed(source);
+    const box = await core(source).boundingBox(); await source.mouse.dblclick(box.x + 35, box.y + 12); await sleep(180); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
+    await closeAnswer(source);
+  });
+  await check('0.9.1 dragging a link never triggers a selection toolbar or model request', async () => {
+    await gotoContext(); fixtures.reset(); const link = source.locator('#ctx-drag-link'); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox();
+    await source.mouse.move(box.x + 15, box.y + box.height / 2); await source.mouse.down(); await source.mouse.move(box.x + 110, box.y + box.height / 2 + 22, { steps: 14 }); await source.mouse.up();
+    await sleep(300); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
+  });
+  await check('0.9.1 consecutive A/B selections cancel delayed A and isolate B output', async () => {
+    await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'slow A request missing'); const old = latest();
+    await selectAndInvoke(source, '#term-b'); assert.match(await completed(source), /CONTEXT_B_OUTPUT/); assert.doesNotMatch(await answer(source).innerText(), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2); await until(() => old.aborted, 'A was not cancelled');
+    assert.equal(await host(source).count(), 1);
+  });
+  await check('0.9.1 stop retains partial output and aborts without later appends', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(async () => (await answer(source).innerText()).includes('CONTEXT_A_OUTPUT'), 'slow stream did not start');
+    const request = latest(); await action(source, 'stop').click(); const stopped = await answer(source).innerText(); await sleep(650);
+    assert.equal(await status(source).getAttribute('data-phase'), 'cancelled'); assert.equal(await answer(source).innerText(), stopped); assert.equal(count(), 1); await until(() => request.aborted, 'stopped connection did not abort');
+  });
+  await check('0.9.1 explicit retry after stop creates one replacement ID and request', async () => {
+    const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'retry did not replace ID');
+    assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2);
+  });
+  await check('0.9.1 API error never automatically retries; explicit retry works after config change', async () => {
+    await gotoContext(); await settings('401'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(async () => await status(source).getAttribute('data-phase') === 'error', '401 error missing');
+    assert.match(await status(source).innerText(), /401|Key/); assert.equal(count(), 1); await sleep(250); assert.equal(count(), 1);
+    await settings('normal'); const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'error retry missing'); await completed(source); assert.equal(count(), 2);
+  });
+  await check('0.9.1 narrow toolbar and result remain inside a 390px viewport', async () => {
+    try {
+      await gotoContext(true); await source.setViewportSize({ width: 390, height: 844 }); fixtures.reset();
+      // The fixture contains deliberately long form fields and sentinel words.
+      // Verify our UI adds no overflow instead of requiring the host page to fit.
+      const baselineScrollWidth = await source.evaluate(() => document.documentElement.scrollWidth);
+      await selectToolbar(source, '#term-foreign');
+      const toolbarBounds = await inViewport(toolbar(source).locator('.toolbar')); await toolbar(source).locator('.toolbar').screenshot({ path: path.join(screenshots, 'toolbar-mobile.png') });
+      await clickToolbar(source, 'translate'); await completed(source); await expand(source); const panelBounds = await inViewport(panel(source));
+      for (const name of ['close', 'copy', 'retry']) assert.equal(await action(source, name).isVisible(), true);
+      const finalScrollWidth = await source.evaluate(() => document.documentElement.scrollWidth);
+      assert.ok(finalScrollWidth <= Math.max(baselineScrollWidth, 390) + 1, 'reading UI added horizontal overflow');
+      await source.screenshot({ path: path.join(screenshots, 'translate-examples-mobile.png') }); return { toolbarBounds, panelBounds, baselineScrollWidth, finalScrollWidth };
+    } finally { await source.setViewportSize({ width: 1280, height: 900 }); }
+  });
+  await check('M1 drag-hover smoke opens before release, blurs on hover and uses no model', async () => {
+    await source.goto(fixtures.origin + '/context-index'); await sleep(180); fixtures.reset(); const windows = (await options.evaluate(() => chrome.windows.getAll())).length;
+    await dragPreview('context-tech', '/context-tech'); assert.equal(count(), 0); assert.equal((await options.evaluate(() => chrome.windows.getAll())).length, windows);
+    await source.locator('local-reader-preview iframe').hover(); await until(async () => await source.locator('local-reader-preview .scrim').evaluate(node => node.classList.contains('active')), 'M1 blur missing');
+    await source.mouse.move(3, 3); await until(async () => !(await source.locator('local-reader-preview .scrim').evaluate(node => node.classList.contains('active'))), 'M1 blur did not clear');
+    return { visibleBeforeMouseup: true, extraWindows: 0, modelRequests: 0 };
+  });
+  await check('0.9.1 actual preview iframe toolbar explains its own technical document', async () => {
+    await source.goto(fixtures.origin + '/context-index'); await sleep(180); fixtures.reset(); const frame = await dragPreview('context-tech', '/context-tech'); await selectAndInvoke(frame, '#term-a');
+    assert.match(await completed(frame), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1); assert.equal(await host(source).count(), 0); assert.equal(input().url, fixtures.origin + '/context-tech'); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_SENTINEL/);
+    await source.screenshot({ path: path.join(screenshots, 'explain-preview-frame.png') });
+  });
+  await check('0.9.1 actual preview iframe toolbar translates and expands bilingual examples', async () => {
+    fixtures.reset(); const frame = await dragPreview('context-foreign', '/context-foreign'); await selectAndInvoke(frame, '#term-foreign', 'translate'); await completed(frame);
+    assert.equal(input().url, fixtures.origin + '/context-foreign'); assert.match(input().title, /Foreign reading/); assert.match(input().paragraphContext, /FOREIGN_CONTEXT_SENTINEL/); assert.equal(count(), 1);
+    await expand(frame); assert.equal(count(), 2); assert.match(await details(frame).innerText(), /The wetland showed resilience/); await source.screenshot({ path: path.join(screenshots, 'translate-preview-frame.png') });
+  });
+  await check('0.9.1 closing parent preview releases old-frame Port and aborts its request', async () => {
+    await settings('slow'); fixtures.reset(); const frame = await dragPreview('context-tech', '/context-tech'); await selectAndInvoke(frame, '#term-a'); await until(() => count() === 1, 'iframe request missing'); const old = latest();
+    await source.locator('local-reader-preview [data-reader-action="close"]').click(); await until(() => old.aborted, 'frame detach did not abort'); assert.equal(count(), 1); assert.equal(await source.locator('local-reader-preview').count(), 0);
+  });
+  await check('0.9.1 navigation cancels old document without contaminating a new answer', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'old-document request missing'); const old = latest();
+    await gotoContext(true); await until(() => old.aborted, 'navigation did not abort'); assert.equal(await host(source).count(), 0); await settings('normal'); await selectAndInvoke(source, '#term-foreign', 'translate');
+    assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.doesNotMatch(await answer(source).innerText(), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2);
+  });
+  await check('0.9.1 missing Key makes zero paid requests after a real toolbar click', async () => {
+    await options.locator('#clear-key').click(); await until(async () => !(await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).hasKey, 'Key clear incomplete'); await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a');
+    await until(async () => await status(source).getAttribute('data-phase') === 'error', 'missing-Key error absent'); assert.match(await status(source).innerText(), /设置|Key|模型/); assert.equal(count(), 0); await settings('normal', fakeKey);
+  });
+  await check('0.9.1 configuration barrier cancels running request until an explicit retry', async () => {
+    await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before config missing'); const old = latest();
+    await settings('normal'); await until(() => old.aborted, 'config did not abort'); await until(async () => await status(source).getAttribute('data-phase') === 'cancelled', 'cancelled config state missing'); await sleep(180); assert.equal(count(), 1);
+    const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'config retry missing'); await completed(source); assert.equal(count(), 2);
+  });
+  await check('0.9.1 clearing Key aborts a running request and never resubmits it', async () => {
+    await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before Key clear missing'); const old = latest();
+    await options.locator('#clear-key').click(); await until(() => old.aborted, 'Key clear did not abort'); await until(async () => await status(source).getAttribute('data-phase') === 'cancelled', 'Key cancelled state absent'); await sleep(200); assert.equal(count(), 1); await settings('normal', fakeKey);
+  });
+  await check('0.9.1 permission revocation aborts running selection and prevents a new paid call', async () => {
+    await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before revoke missing'); const old = latest();
+    await options.evaluate(() => chrome.permissions.remove({ origins: ['http://127.0.0.1/*'] })); await until(() => old.aborted, 'permission revoke did not abort'); await until(async () => await host(source).count() === 0, 'revoked UI remained');
+    await realSelect(source, '#term-b'); await sleep(250); if (await toolbar(source).count()) await tool(source, 'translate').click(); await sleep(250); assert.equal(count(), 1);
+    return 'Selection completion after revocation cannot start another model request.';
+  });
+  await check('0.9.1 production toolbar path leaves storage/network and build boundaries intact', async () => {
+    const persisted = await options.evaluate(() => Promise.all([chrome.storage.local.get(null), chrome.storage.sync.get(null)])); assert.ok(!JSON.stringify(persisted).includes(fakeKey)); assert.ok(!JSON.stringify(persisted).includes('CONTEXT_A_NEAR_SENTINEL')); assert.deepEqual(persisted[1], {});
+    assert.ok(report.network.every(request => ['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname))); assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined');
+    assert.deepEqual(await hashDirectory(testExtension), testedFiles); assert.deepEqual(await hashDirectory(path.join(root, 'dist')), testedFiles);
+    return { toolbarWorkerTestEntry: false, realModelVerified: false };
+  });
+
+  // Instrument only this final native-menu supplement. All toolbar checks above
+  // have already run in a reloaded production worker without this helper.
+  // Permission revocation above is intentional. Start this supplemental native
+  // menu check in a fresh profile instead of waiting on an invisible permission
+  // increase dialog while reloading the already-revoked extension headlessly.
+  await context.close();
+  const nativeHarness = ';(()=>{const handlers=[];globalThis.__contextE2EHandlers=handlers;const add=chrome.contextMenus.onClicked.addListener.bind(chrome.contextMenus.onClicked);chrome.contextMenus.onClicked.addListener=(listener)=>{handlers.push(listener);add(listener)};globalThis.__contextE2EDispatch=(info,tab)=>{for(const listener of handlers)listener(info,tab);return handlers.length}})();\n';
+  await fs.writeFile(backgroundPath, nativeHarness + productionBackground);
+  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
+  nativeProfile = await fs.mkdtemp(path.join(output, 'context-native-0.9.1-profile-')); assertTestDirectory(nativeProfile);
+  context = await chromium.launchPersistentContext(nativeProfile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'] });
+  context.setDefaultTimeout(8000);
+  worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 12000 }); extensionId = new URL(worker.url()).hostname;
+  await until(() => worker.evaluate(() => globalThis.__contextE2EHandlers?.length > 0), 'native supplement worker unavailable');
+  await fs.writeFile(manifestPath, productionManifest); await fs.writeFile(backgroundPath, productionBackground);
+  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true; report.testHarness.nativeMenuCallbackInstrumented = true;
+  options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'native supplement settings unavailable'); await settings('normal', fakeKey); source = await context.newPage();
+  await check('0.9.1 native-menu supplement uses a trusted contextmenu snapshot', async () => {
+    await gotoContext(); fixtures.reset(); await nativeInvoke(source, '#term-a', 'explain'); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1);
+    assert.equal(input().selection.trim(), 'coherence'); report.testHarness.trustedNativeContextMenuEvent = true; return { nativeMenuSelectionVerified: false, listenerInvokedByHarness: true };
+  }, 'instrumented-native-menu-supplement');
+  await check('0.9.1 native-menu snapshot survives selection collapse before the explicit menu callback', async () => {
+    await gotoContext(); fixtures.reset(); await nativeInvoke(source, '#term-a', 'explain', { clearAfterMenu: true }); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1);
+    assert.equal(await selected(source), ''); assert.equal(input().selection.trim(), 'coherence');
+    return { nativeMenuSelectionVerified: false, trustedContextMenuZeroRequests: true, callbackRequests: 1, selectionCollapsedAfterCapture: true };
+  }, 'instrumented-native-menu-supplement');
+  await check('0.9.1 native-menu supplement rejects empty selection without reusing previous text', async () => {
+    await gotoContext(); fixtures.reset(); await source.locator('#ctx-empty').scrollIntoViewIfNeeded(); await source.evaluate(() => getSelection()?.removeAllRanges());
+    await nativeInvoke(source, undefined, 'explain', { textOverride: '' }); await until(async () => await status(source).getAttribute('data-phase') === 'error', 'empty native error missing'); assert.equal(count(), 0);
+  }, 'instrumented-native-menu-supplement');
+  await check('0.9.1 native harness restores exact temporary and production bytes', async () => {
+    assert.deepEqual(await hashDirectory(testExtension), testedFiles); assert.deepEqual(await hashDirectory(path.join(root, 'dist')), testedFiles);
+    return { nativeMenuSelectionVerified: false, temporaryCopyRestoredByteIdentical: true };
+  }, 'instrumented-native-menu-supplement');
+} catch (error) { fatal = error; report.fatal = error.message; process.stdout.write(`FATAL ${error.message}\n`); }
+finally {
+  if (context) await context.close().catch(() => {}); await fixtures.close();
+  const after = await hashDirectory(path.join(root, 'dist')); report.testedBuild.unchangedAfterTest = JSON.stringify(after) === JSON.stringify(testedFiles);
+  if (!report.testedBuild.unchangedAfterTest) { report.fatal = 'Production dist changed during context test'; fatal ??= new Error(report.fatal); }
+  report.passed = report.checks.filter(item => item.result === 'pass').length; report.failed = report.checks.filter(item => item.result === 'fail').length;
+  const passed = fragment => report.checks.some(item => item.result === 'pass' && item.name.includes(fragment));
+  report.coverage = {
+    automaticToolbarZeroRequests: passed('trusted selection shows compact toolbar'),
+    oneClickTranslation: passed('translate click makes exactly one request'),
+    mainAndPreviewFrames: ['translate click makes exactly one request', 'technical explanation retains nearby', 'actual preview iframe toolbar explains', 'actual preview iframe toolbar translates'].every(passed),
+    bilingualPairs: passed('short-English expansion has 1–2 actual English/Chinese pairs') && passed('actual preview iframe toolbar translates'),
+    usageExamples: passed('technical explanation retains nearby'),
+    longTranslationNoExamples: passed('long paragraph translation sends the complete selection'),
+    selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting the answer itself', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
+    m1DragSmoke: passed('M1 drag-hover smoke')
+  };
+  await fs.writeFile(path.join(output, 'context-e2e-report-0.9.1.json'), JSON.stringify(report, null, 2) + '\n');
+  for (const temporaryProfile of [nativeProfile, profile].filter(Boolean)) { assertTestDirectory(temporaryProfile); await fs.rm(temporaryProfile, { recursive: true, force: true }); }
+  process.stdout.write(`Mock context 0.9.1 e2e: ${report.passed} passed, ${report.failed} failed. Native menu item selection remains manual.\n`);
+  if (fatal || report.failed) process.exitCode = 1;
+}

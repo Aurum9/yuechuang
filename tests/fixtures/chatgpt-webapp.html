@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>本地 ChatGPT 客户端测试页</title>
+    <link rel="modulepreload" href="/cdn/assets/633146.1234567890.js" />
+    <script type="module">
+      import { __webpack_require__ } from '/cdn/assets/633146.1234567890.js';
+
+      // Simulate an already open SPA document after its initial asset markup and
+      // resource timings have been discarded. This belongs to the independent
+      // fake website; the extension receives no test-only discovery entry point.
+      if (location.pathname === '/c/personal-chat') {
+        const calls = { start: 0, poll: 0, cancel: 0 };
+        const oldBridge = Object.freeze({
+          version: 'reader-native-v2',
+          start() { calls.start++; return false; },
+          poll(id) { calls.poll++; return { type: 'error', id, stage: 'client', code: 'pageUnsupported' }; },
+          cancel() { calls.cancel++; }
+        });
+        Object.defineProperty(window, '__readerNativeWebappBridge', {
+          value: oldBridge, configurable: false, writable: false, enumerable: false
+        });
+        window.__reactRouterManifest = { entry: { imports: ['/cdn/assets/633146.1234567890.js'] } };
+        for (const element of document.querySelectorAll('script,link[rel~="modulepreload"]')) element.remove();
+        performance.clearResourceTimings();
+        Object.defineProperty(window, '__fixtureLongLivedPageState', {
+          value: Object.freeze({ documentId: crypto.randomUUID(), runtimeLoaded: typeof __webpack_require__ === 'function', calls }),
+          configurable: false, writable: false, enumerable: false
+        });
+      }
+    </script>
+  </head>
+  <body>
+    <label for="draft">仅用于确认扩展不会改动官网草稿</label>
+    <textarea id="draft" aria-label="测试用户草稿"></textarea>
+  </body>
+</html>

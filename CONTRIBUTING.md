@@ -1,0 +1,39 @@
+# 参与开发
+
+建议先阅读 [README](README.md) 中的连接方式和隐私边界。当前以个人使用和小范围试用为主，欢迎提交问题与小范围修复。
+
+## 本机验证
+
+使用 Node.js 22.12+，安装依赖后运行：
+
+```sh
+npm ci
+npm test
+npm run build
+```
+
+设置界面的浏览器模拟检查：
+
+```sh
+npx playwright install chromium
+npm run test:siwc-ui
+```
+
+Windows 助手使用 `helper/go.mod` 指定的 Go 版本：
+
+```powershell
+.\scripts\helper-build.ps1
+.\scripts\helper-smoke.ps1
+```
+
+测试使用合成凭证和本机服务。提交时说明验证范围；模拟通过与真实账号、原生侧栏的人工验收分别记录。
+
+## 提交范围
+
+- 一个改动解决一个明确问题，PR 描述写出触发条件、结果和验证方式。
+- 不提交 Key、OAuth Token、授权回调、浏览器资料、真实网页截图或个人诊断记录。
+- `dist/`、发布 ZIP、助手 EXE、测试输出及原始验收附件保留在本地，不放进源码提交。
+- 测试中的假 Key 和 Token 应明确标记为合成数据，禁止换成真实凭证。
+- 保持可取消、权限按需申请、失败不自动重发等现有行为。新增模型请求或数据发送范围时，应同时更新使用说明。
+
+详细实现与历史验收见 [开发历史与验收索引](docs/开发历史与验收索引.md)。

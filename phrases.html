@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>阅读助手 · 词句收藏</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="masthead">
+        <a class="brand" href="options.html"><span class="brand-mark" aria-hidden="true">阅</span><span>阅读助手<span class="brand-caption">个人阅读工具</span></span></a>
+        <a class="settings-link" href="options.html">返回设置 <span aria-hidden="true">↗</span></a>
+      </header>
+
+      <section class="intro" aria-labelledby="page-title">
+        <div><p class="eyebrow">留在本机 · 随时回看</p><h1 id="page-title">读过，也记得。</h1><p class="intro-description">收藏阅读中遇到的词句，连同回答、原文语境和出处一起留下。</p></div>
+        <div class="collection-count"><strong id="total-count">—</strong><span>条词句收藏</span></div>
+      </section>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite" hidden></div>
+
+      <section class="library" aria-label="本机词句收藏">
+        <div class="library-toolbar">
+          <div class="search-field"><label for="search">搜索收藏</label><input id="search" type="search" placeholder="搜索词句、回答、语境或来源" autocomplete="off" /></div>
+          <div class="filter-group" role="group" aria-label="按查阅方式筛选"><button type="button" class="filter active" data-mode="all" aria-pressed="true">全部</button><button type="button" class="filter" data-mode="translate" aria-pressed="false">翻译</button><button type="button" class="filter" data-mode="explain" aria-pressed="false">解释</button></div>
+        </div>
+
+        <div class="library-summary"><p id="result-count" role="status" aria-live="polite">正在读取本机收藏…</p><button id="refresh" class="plain-button" type="button">刷新列表 <span aria-hidden="true">↻</span></button></div>
+        <div id="entries" class="entries" aria-label="收藏列表"></div>
+        <div id="empty-state" class="empty-state" hidden><span class="empty-mark" aria-hidden="true">文</span><h2 id="empty-title">还没有收藏的词句</h2><p id="empty-description">在网页上选中文字，完成翻译或解释后，点击「收藏」即可留在这里。</p><button id="reset-search" class="button button-secondary" type="button" hidden>查看全部收藏</button></div>
+      </section>
+
+      <section class="export-card" aria-labelledby="export-title">
+        <div class="export-intro"><p class="eyebrow">自己的资料，自己留存</p><h2 id="export-title">导出一份本机备份</h2><p>JSON 保留完整字段，Markdown 适合阅读。当前支持导出，暂不提供导入。</p></div>
+        <div class="export-controls"><label for="export-scope">导出范围</label><select id="export-scope"><option value="all">全部收藏</option><option value="filtered">当前筛选结果</option></select><div class="export-actions"><button id="export-json" class="button button-primary" type="button" disabled>导出 JSON</button><button id="export-markdown" class="button button-secondary" type="button" disabled>导出 Markdown</button></div><p id="export-hint">仅包含词句收藏，不含 API Key 或模型配置。</p></div>
+      </section>
+
+      <footer>阅读助手 <span aria-hidden="true">/</span> 收藏仅保存在这台电脑 <span aria-hidden="true">/</span> 无云同步</footer>
+    </main>
+
+    <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description"><form id="delete-form"><p class="eyebrow">删除收藏</p><h2 id="delete-title">删除这条词句？</h2><p id="delete-description">删除后无法撤销，可先导出备份。</p><blockquote id="delete-text"></blockquote><p id="delete-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-delete" type="button" class="button button-secondary">保留收藏</button><button id="confirm-delete" type="submit" class="button button-danger">确认删除</button></div></form></dialog>
+    <script type="module" src="/src/phrases-page.ts"></script>
+  </body>
+</html>

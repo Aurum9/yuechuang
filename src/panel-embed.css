@@ -1,0 +1,19 @@
+.panel-embedded .page-shell{max-width:none;padding:12px}
+.panel-embedded .masthead,.panel-embedded .intro,.panel-embedded footer{display:none}
+.panel-embedded .settings-layout,.panel-embedded .workspace{display:flex;flex-direction:column;gap:16px;margin-top:0}
+.panel-embedded .settings-layout>*,.panel-embedded .workspace>*{min-width:0;width:100%}
+.panel-embedded .card{padding:18px 16px}
+.panel-embedded .setup-card{display:flex;flex-direction:column;gap:18px;padding:18px 16px;margin-top:0}
+.panel-embedded .scope-note{padding:14px}
+.panel-embedded .scope-note .scope-mark{display:none}
+.panel-embedded .scope-note h3{font-size:14px}
+.panel-embedded .scope-note ol{margin:6px 0}
+.panel-embedded .scope-note p{font-size:11px;margin:6px 0}
+.panel-embedded .result-header{gap:10px}
+.panel-embedded .task-panel{padding:18px 14px}
+.panel-embedded .history-panel{position:static;padding:18px 16px}
+.panel-embedded .library-toolbar{margin-top:0}
+.panel-embedded .export-card{margin-top:18px}
+.panel-embedded .phrase-card{padding:16px}
+.panel-embedded .form-actions,.panel-embedded .setup-actions{flex-wrap:wrap}
+@media(max-width:360px){.panel-embedded .page-shell{padding:9px}.panel-embedded .card,.panel-embedded .setup-card{padding:15px 12px}.panel-embedded .report-actions{flex-direction:column;align-items:stretch}}

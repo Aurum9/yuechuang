@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>阅窗 · 阅读助手</title>
+  </head>
+  <body>
+    <div class="sidebar-shell">
+      <header class="sidebar-header">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">阅</span><span class="brand-name">阅窗<small>个人阅读助手</small></span></div>
+        <span class="local-label"><i aria-hidden="true"></i>本机 · 自用</span>
+      </header>
+      <nav class="panel-tabs" role="tablist" aria-label="阅读工具">
+        <button type="button" id="tab-chat" data-panel-tab="chat" role="tab" aria-selected="true" aria-controls="panel-chat" tabindex="0"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Z"/><path d="M6.5 7h7M6.5 10h4"/></svg><span>对话</span></button>
+        <button type="button" id="tab-research" data-panel-tab="research" role="tab" aria-selected="false" aria-controls="panel-research" tabindex="-1"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 4h5l2 2h6v10h-13Z"/><path d="M7 9h6M7 12h4"/></svg><span>跨页研究</span></button>
+        <button type="button" id="tab-phrases" data-panel-tab="phrases" role="tab" aria-selected="false" aria-controls="panel-phrases" tabindex="-1"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h10v13l-5-3-5 3Z"/><path d="M8 7h4"/></svg><span>收藏</span></button>
+        <button type="button" id="tab-settings" data-panel-tab="settings" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14M3 14h14M7 3v6M13 11v6"/></svg><span>设置</span></button>
+      </nav>
+      <main class="panel-workspace">
+        <section class="panel chat-panel" id="panel-chat" role="tabpanel" aria-labelledby="tab-chat">
+          <div class="chat-heading"><div><h1>直接对话</h1><p id="chat-status" role="status">正在连接…</p><p id="chat-connection" class="chat-connection" hidden></p></div><button type="button" class="quiet-button" id="chat-new" disabled><span aria-hidden="true">＋</span> 新对话</button></div>
+          <div class="chat-scroll" id="chat-scroll">
+            <div id="chat-empty" class="chat-empty">
+              <div class="empty-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M12 9h19l6 6v24H12Z"/><path d="M31 9v7h6M18 23h13M18 29h9"/><path class="symbol-spark" d="M9 3v8M5 7h8"/></svg></div>
+              <p class="eyebrow">留在这一页，继续想一想</p>
+              <h2>想聊点什么？</h2>
+              <p class="empty-description">查阅概念、整理思路，<br />或接着一个问题继续问。</p>
+              <div class="suggestions" id="chat-suggestions"><button type="button" data-chat-prompt="请用通俗的语言解释：">解释一个概念 <span aria-hidden="true">↗</span></button><button type="button" data-chat-prompt="请帮我梳理以下问题的思路：">帮我梳理思路 <span aria-hidden="true">↗</span></button></div>
+              <p class="context-note">对话仅包含你输入的内容，不会自动读取网页。</p>
+            </div>
+            <div class="chat-setup" id="chat-setup" hidden><span class="setup-symbol" aria-hidden="true">↗</span><div><h2 id="chat-setup-heading">先连接你的模型</h2><p id="chat-setup-text">在设置中填写接口、模型和 Key，即可开始对话。</p><button type="button" class="inline-button" data-navigate="settings">前往设置 <span aria-hidden="true">→</span></button></div></div>
+            <div id="chat-messages" class="chat-messages" aria-label="对话消息" role="log" aria-relevant="additions" aria-live="off"></div>
+          </div>
+          <div class="composer-region">
+            <p id="chat-feedback" class="chat-feedback" role="status" aria-live="polite" hidden></p>
+            <form id="chat-form" class="chat-form">
+              <label for="chat-input" class="visually-hidden">输入消息</label>
+              <textarea id="chat-input" rows="3" maxlength="6000" placeholder="输入问题，继续对话…" aria-describedby="composer-help" spellcheck="false"></textarea>
+              <div class="composer-tools"><span id="chat-input-count">0 / 6,000</span><button type="button" id="chat-stop" class="stop-button" hidden><span aria-hidden="true">■</span> 停止生成</button><button type="submit" id="chat-send" class="send-button" disabled>发送 <span aria-hidden="true">↑</span></button></div>
+            </form>
+            <p class="composer-help" id="composer-help"><span>Enter 发送 · Shift + Enter 换行</span><span id="chat-history-note">会话仅本次浏览器使用</span></p>
+          </div>
+        </section>
+        <section class="panel frame-panel" id="panel-research" role="tabpanel" aria-labelledby="tab-research" hidden></section>
+        <section class="panel frame-panel" id="panel-phrases" role="tabpanel" aria-labelledby="tab-phrases" hidden></section>
+        <section class="panel frame-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
+      </main>
+    </div>
+    <dialog id="chat-clear-dialog" aria-labelledby="chat-clear-title" aria-describedby="chat-clear-description"><form method="dialog"><p class="eyebrow">开启新的思路</p><h2 id="chat-clear-title">开始新对话？</h2><p id="chat-clear-description">当前会话中的消息会被清空。正在生成的回答也会停止。</p><div class="dialog-actions"><button type="button" id="chat-clear-cancel" class="dialog-cancel">继续当前对话</button><button type="button" id="chat-clear-confirm" class="dialog-confirm">开始新对话</button></div></form></dialog>
+    <script type="module" src="/src/sidepanel.ts"></script>
+  </body>
+</html>

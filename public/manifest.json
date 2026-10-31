@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "阅窗 · 本机阅读助手",
+  "description": "点击打开阅窗侧边栏：直接对话、跨页研究、词句收藏与设置，使用自己的模型接口，本机保存资料。",
+  "version": "0.13.0",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "storage",
+    "scripting",
+    "webNavigation",
+    "declarativeNetRequestWithHostAccess",
+    "contextMenus",
+    "sidePanel",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开阅窗侧边栏"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src 'self'; frame-ancestors 'self'"
+  }
+}

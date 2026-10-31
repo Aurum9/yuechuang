@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>阅读助手 · 设置</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="masthead">
+        <a class="brand" href="#top" aria-label="阅读助手设置首页"><span class="brand-mark" aria-hidden="true">阅</span><span>阅读助手<span class="brand-caption">个人阅读工具</span></span></a>
+        <nav class="workspace-links" aria-label="阅读工具"><a class="local-badge" href="research.html" id="open-research">跨页研究 ↗</a><a class="local-badge" href="phrases.html" id="open-phrases">词句收藏 ↗</a></nav>
+      </header>
+
+      <section class="intro" id="top" aria-labelledby="page-title">
+        <p class="eyebrow">阅窗 · 阅读与收藏</p>
+        <h1 id="page-title">给阅读留一点余地。</h1>
+        <p class="intro-description">拖动链接，在原页的预览窗里读目标网页；需要时，再读一段中文摘要。</p>
+        <ol class="quick-start" aria-label="开始使用的三个步骤"><li><span>1</span>配置模型接口</li><li><span>2</span>授权阅读网站</li><li><span>3</span>划词查阅或拖动链接</li></ol>
+      </section>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite" hidden></div>
+      <div id="storage-warning" class="feedback feedback-warning" role="status" hidden></div>
+
+      <div class="settings-layout">
+        <div class="primary-column">
+          <section class="card connection-card" id="connection-card" aria-labelledby="connection-heading">
+            <div class="section-heading"><span class="step-number" aria-hidden="true">↗</span><div><h2 id="connection-heading">侧栏对话连接</h2><p>选择侧栏聊天使用的账号或接口。</p></div></div>
+            <form id="connection-form">
+              <fieldset class="connection-choices"><legend class="visually-hidden">对话连接方式</legend><label class="connection-choice"><input type="radio" name="chat-provider" value="chatgptOAuth" id="connection-oauth" /><span><strong>ChatGPT 订阅（官方登录）</strong><small>通过本地助手授权套餐用量</small></span></label><label class="connection-choice"><input type="radio" name="chat-provider" value="apiKey" id="connection-api" checked /><span><strong>模型 API</strong><small>使用下方保存的接口与 Key</small></span></label></fieldset>
+              <div id="siwc-details" class="siwc-details" hidden>
+                <p class="connection-explanation">首次使用需安装本地助手，点击登录后在 OpenAI 官方页面授权身份和 ChatGPT 套餐用量。日常对话由阅窗直连 OpenAI，无需保留 ChatGPT 标签页。可用额度和模型以账号授权为准。</p>
+                <div class="connection-status" role="status" aria-live="polite"><span class="connection-state-dot" id="siwc-state-dot" aria-hidden="true"></span><div><strong id="siwc-status">尚未检查本地助手</strong><span id="siwc-account" hidden></span></div></div>
+                <dl class="siwc-access"><div><dt>身份登录</dt><dd id="siwc-identity">尚未登录</dd></div><div><dt>套餐用量</dt><dd id="siwc-entitlement">尚未授权</dd></div></dl>
+                <p id="siwc-failure" class="connection-feedback is-error" role="status" aria-live="polite" hidden></p>
+                <p id="siwc-diagnostic" class="connection-feedback" role="status" aria-live="polite" hidden></p>
+                <div id="siwc-helper-help"><p class="field-help">先运行本地助手包中的安装脚本，使用下方扩展 ID 完成注册，再点击「检查助手 / 刷新模型」。助手按需运行，长期凭证加密保存在本机。</p><div class="siwc-extension-registration"><label for="siwc-extension-id">当前扩展 ID</label><div class="input-action"><input id="siwc-extension-id" type="text" readonly spellcheck="false" aria-describedby="siwc-extension-help" /><button type="button" class="button button-secondary" id="siwc-copy-id">复制 ID</button></div><p id="siwc-extension-help" class="field-help">安装脚本需要此 ID，将本地助手限定为只接受当前阅窗扩展的连接。</p></div></div>
+                <div class="connection-actions"><button type="button" class="button button-secondary" id="siwc-login">使用 ChatGPT 登录 ↗</button><button type="button" class="button button-secondary" id="siwc-refresh">检查助手 / 刷新模型</button><button type="button" class="button button-secondary" id="siwc-cancel" hidden>取消登录</button><button type="button" class="button button-secondary" id="siwc-new-account">使用其他账号</button><button type="button" class="button button-secondary" id="siwc-logout">退出本机账号</button><button type="button" class="button button-secondary" id="siwc-copy-diagnostics">复制连接诊断</button></div>
+                <p id="siwc-logout-notice" class="field-help" role="status" hidden>本机凭证已清除，远端授权撤销尚未确认。可在 OpenAI 账号的应用授权设置中检查或撤销。</p>
+                <p class="field-help">需要切换账号时，点击「使用其他账号」重新进行官方授权。</p>
+                <p class="field-help">检查会按需启动助手并访问 OpenAI 获取授权状态和可用模型，不发送聊天问题。登录授权成功后，仍需发送一次问题验证实际对话能力。</p>
+                <div class="field"><label for="siwc-model">ChatGPT 订阅模型</label><select id="siwc-model" aria-describedby="siwc-model-help"><option value="">授权套餐用量后选择可用模型</option></select><p class="field-help" id="siwc-model-help">仅显示官方 API 返回的可用模型。对话保存在当前浏览器会话中，不会写入 ChatGPT 官网聊天列表。</p></div>
+              </div>
+              <p class="connection-scope">此选择仅用于「对话」标签。划词翻译、文章摘要和跨页研究继续使用下方的模型 API 配置。</p>
+              <div id="connection-feedback" class="connection-feedback" role="status" aria-live="polite" hidden></div>
+              <div class="form-actions connection-save-actions"><button type="submit" class="button button-primary" id="save-connection">保存对话连接</button><span id="connection-save-state" class="save-state">正在读取…</span></div>
+            </form>
+          </section>
+          <section class="card" aria-labelledby="model-heading">
+            <div class="section-heading"><span class="step-number">01</span><div><h2 id="model-heading">模型 API 配置</h2><p>用于 API 对话、划词翻译、摘要与研究。兼容 Chat Completions 接口。</p></div></div>
+            <form id="settings-form">
+              <div class="field"><label for="base-url">API Base URL <span class="required-label">必填</span></label><input id="base-url" name="baseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1" required aria-describedby="base-help endpoint-preview" /><p class="field-help" id="base-help">支持 HTTPS，或本机 localhost / 127.0.0.1 的 HTTP 接口。也可填写完整的 /chat/completions 地址。</p><p class="endpoint-preview" id="endpoint-preview">填写后显示实际请求地址</p></div>
+              <div class="field"><label for="model">模型标识 <span class="required-label">必填</span></label><input id="model" name="model" type="text" autocomplete="off" spellcheck="false" placeholder="填写服务商提供的模型名" required maxlength="200" /></div>
+              <div class="field"><div class="label-line"><label for="api-key">API Key</label><span id="key-status" class="key-status">正在读取…</span></div><input id="api-key" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="在本机填写；留空保留已有 Key" aria-describedby="key-help" /><p class="field-help" id="key-help">保存后立即清空输入框，已有 Key 不回显。未配置 Key 时仍可预览原网页。</p></div>
+              <label class="check-row" for="remember-key"><input id="remember-key" name="rememberKey" type="checkbox" /><span><strong>在这台电脑上记住 Key</strong><small>默认只在浏览器会话内保存。勾选后写入扩展本机存储，未做额外加密。</small></span></label>
+              <div class="divider"></div>
+              <label class="check-row" for="auto-summary"><input id="auto-summary" name="autoSummary" type="checkbox" /><span><strong>拖动新链接后自动生成中文摘要</strong><small>默认关闭。开启后，正文就绪即向所配接口发送内容；预览内后续导航仍需手动总结。</small></span></label>
+              <div class="field budget-field"><label for="input-budget">单次上下文预算 <span class="required-label">估算 token</span></label><input id="input-budget" name="inputBudgetTokens" type="number" min="2048" max="128000" step="1" value="16000" required aria-describedby="budget-help" /><p class="field-help" id="budget-help">默认 16,000，范围 2,048—128,000。请低于所用模型的实际上下文上限；系统会预留提示和输出空间。未知模型使用带余量的保守估算，无法保证与服务商分词精确一致。</p></div>
+              <label class="check-row" for="auto-long-summary"><input id="auto-long-summary" name="autoLongSummary" type="checkbox" /><span><strong>允许自动摘要对长文发起多次模型请求</strong><small>默认关闭。超预算文章会按原文顺序分段，再逐层整合；开始前显示预计调用次数。开启后，自动摘要也可执行整组调用，可能增加费用；可随时停止，已产生的调用仍可能计费。</small></span></label>
+              <p class="field-help summary-scope">摘要覆盖当前已加载、可访问并成功提取的可见正文。付费预览或分页会注明范围；达到 300,000 字符资源上限时停止并提示，不自动抓取隐藏内容。</p>
+              <div class="form-actions"><button type="submit" class="button button-primary" id="save-settings">保存配置 <span aria-hidden="true">↗</span></button><button type="button" class="button button-secondary" id="test-connection">保存并测试连接</button><span id="save-state" class="save-state" aria-live="polite"></span></div>
+              <p class="action-help">测试连接会发送一次简短模型请求，可能产生接口费用；先授权接口所在域。</p>
+            </form>
+            <div id="test-result" class="test-result" hidden><span class="result-label">接口返回</span><p id="test-text"></p></div>
+          </section>
+
+          <section class="card" aria-labelledby="permission-heading">
+            <div class="section-heading"><span class="step-number">02</span><div><h2 id="permission-heading">选择可访问的网站</h2><p>来源页、目标页和模型接口都需要对应的域权限。</p></div></div>
+            <div class="permission-summary"><span id="permission-dot" class="permission-dot" aria-hidden="true"></span><p id="permission-status">正在检查授权…</p></div>
+            <div class="permission-actions"><button type="button" class="button button-primary" id="grant-https">启用 HTTPS 网页访问</button><button type="button" class="button button-secondary" id="grant-local">授权本机 HTTP</button></div>
+            <p class="field-help permission-help">HTTPS 授权适用于所有 HTTPS 网站。你也可以只授权下方指定的网站；本机 HTTP 仅覆盖 localhost 与 127.0.0.1。</p>
+            <div class="domain-grant"><label for="permission-origin">按域授权</label><div class="input-action"><input id="permission-origin" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com" /><button class="button button-secondary" type="button" id="grant-origin">授权这个域</button></div><p class="field-help">输入网站或 API 地址，只申请该域的全部路径。来源页与目标页跨域时，请分别授权。</p></div>
+            <div class="permission-list-header"><h3>当前授权</h3><span id="permission-count" class="count-badge">0 条</span></div>
+            <ul id="permission-list" class="permission-list" aria-label="已授权的网站"></ul>
+            <p class="field-help">撤销权限会停止相关摘要任务。授权变更后，若已打开的网页没有预览投放区，请刷新网页。</p>
+          </section>
+        </div>
+
+        <aside class="secondary-column">
+          <section class="card reading-note" aria-labelledby="usage-heading"><p class="eyebrow">准备好之后</p><h2 id="usage-heading">保持原页，向外看一眼。</h2><div class="preview-illustration" aria-hidden="true"><div class="mini-page"><i></i><b></b><span></span><span></span><span></span><span></span></div><div class="mini-preview"><div><i></i><i></i><i></i></div><b></b><span></span><span></span><em>中文摘要</em></div></div><p>在已授权网页上拖动一个链接，移入「预览」投放区后松开。页内预览窗会加载真实目标网页。</p><p>点击预览窗里的「总结」，或开启自动摘要。关闭预览后，继续原来的阅读。站点 CSP 阻止嵌入时，可在普通标签页打开。</p><div class="note-foot">普通点击与右键 Google 搜索可继续使用。</div></section>
+
+          <section class="card data-card" aria-labelledby="data-heading"><h2 id="data-heading">本机数据</h2><div class="cache-counter"><strong id="cache-count">—</strong><span>条会话摘要缓存</span></div><p class="field-help">缓存仅用于当前浏览器会话去重，不保留永久聊天历史。</p><div class="data-actions"><button type="button" class="text-button" id="clear-cache">清空会话摘要缓存 <span aria-hidden="true">↗</span></button><button type="button" class="text-button" id="export-settings">导出配置（不含 Key）<span aria-hidden="true">↗</span></button><button type="button" class="text-button destructive" id="clear-key">清除已保存 Key <span aria-hidden="true">↗</span></button></div></section>
+
+          <section class="privacy-note" aria-labelledby="privacy-heading"><h2 id="privacy-heading">知道数据去哪里</h2><p>设置和可选记住的 Key 留在本机，不使用云同步、自建服务或统计上报。</p><p>生成摘要时，标题、网址与提取正文发送到你配置的模型 API。服务商的数据保留规则以其说明为准。</p><p>ChatGPT 官方登录的长期凭证由本地助手加密保存；对话由 OpenAI 处理，阅窗不向自建服务器发送内容，也不把对话写入官网聊天列表。</p><p>摘要浮层位于目标网页中，该网页可能读取摘要。Key 仅由扩展后台持有，不发给网页或内容脚本。</p></section>
+        </aside>
+      </div>
+      <footer>阅读助手 <span aria-hidden="true">/</span> M1 · 页内预览与全文摘要 <span aria-hidden="true">/</span> Chrome 120+</footer>
+    </main>
+    <script type="module" src="/src/options.ts"></script>
+  </body>
+</html>
