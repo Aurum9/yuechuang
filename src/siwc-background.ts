@@ -50,8 +50,8 @@ async function token(signal?: AbortSignal): Promise<NonNullable<typeof access>> 
   if (access && access.accountId === status.accountId && access.expiresAt > Date.now() + 60_000) return access;
   const before = revision;
   const accountId = status.accountId;
-  // The auth store serializes rotation. Each task supplies its own cancellation
-  // signal so stopping a lookup cannot cancel a chat waiting for credentials.
+  // The auth store serializes and persists rotation independently of task
+  // cancellation. This signal prevents a stopped task from consuming its result.
   const combined = signal ? AbortSignal.any([signal, accessController.signal]) : accessController.signal;
   const value = await siwcAuth.call('getAccessToken', combined);
   combined.throwIfAborted();
