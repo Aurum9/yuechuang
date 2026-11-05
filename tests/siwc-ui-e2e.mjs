@@ -89,8 +89,8 @@ try {
           return siwcView();
         }
         if (value.type === 'siwc:logout') {
-          if (mock.failLogout === 'response') return { ok: false, error: '本地助手操作失败，请检查安装后重试。' };
-          if (mock.failLogout === 'view') { mock.status = { ...emptyStatus, state: 'helperMissing', error: '本地助手未正确注册。' }; return siwcView(); }
+          if (mock.failLogout === 'response') return { ok: false, error: '登录凭证操作失败，请检查扩展存储后重试。' };
+          if (mock.failLogout === 'view') { mock.status = { ...emptyStatus, state: 'error', error: '凭证存储读取失败。' }; return siwcView(); }
           mock.status = { ...emptyStatus, state: 'signedOut', remoteRevoked: false }; return siwcView();
         }
         return { ok: false, error: 'Unexpected UI mock message' };
@@ -224,14 +224,12 @@ try {
     await page.locator('#siwc-cancel').click();
     await page.waitForFunction(() => !__siwcUi.status.loginPending && !document.querySelector('#save-connection').disabled);
     assert.equal((await page.evaluate(() => __siwcUi.calls)).some(value => value.type === 'siwc:cancel'), true);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions[0]), { origins: ['https://api.openai.com/*'] });
+    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions[0]), { origins: ['https://auth.openai.com/*', 'https://api.openai.com/*', 'http://127.0.0.1/*'] });
   });
-  await check('installation shows and copies only this extension ID', async () => {
-    assert.equal(await page.locator('#siwc-extension-id').inputValue(), 'mock-extension-id');
-    assert.equal(await page.locator('#siwc-extension-id').getAttribute('readonly'), '');
-    await page.locator('#siwc-copy-id').click();
-    await page.waitForFunction(() => __siwcUi.copied.length === 1);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.copied), ['mock-extension-id']);
+  await check('browser-only sign-in has no helper installer or extension registration controls', async () => {
+    assert.equal(await page.locator('#siwc-extension-id, #siwc-copy-id, #siwc-helper-help').count(), 0);
+    assert.match(await page.locator('.connection-explanation').innerText(), /无需额外安装程序/);
+    assert.doesNotMatch(await page.locator('#siwc-details').innerText(), /PowerShell|安装脚本|检查助手/);
   });
   await check('using another account explicitly requests a new authorization client', async () => {
     const regular = await page.evaluate(() => __siwcUi.calls.find(value => value.type === 'siwc:login'));
@@ -295,7 +293,7 @@ try {
     assert.deepEqual(snapshot.diagnostic.responseKeys, ['id']);
     assert.doesNotMatch(await page.locator('#siwc-diagnostic').innerText(), /SECRET/);
   });
-  await check('failed helper logout never claims that local credentials were cleared', async () => {
+  await check('failed credential logout never claims that local credentials were cleared', async () => {
     for (const failure of ['response', 'view']) {
       await page.evaluate(failure => { __siwcUi.failLogout = failure; __siwcUi.status = { state: 'ready', loggedIn: true, planAuthorized: true, models: [{ id: 'mock-official-model', label: '模拟订阅模型' }], generation: 'unchecked', helperVersion: 'mock-1' }; }, failure);
       await page.locator('#siwc-refresh').click();
@@ -612,5 +610,7 @@ try {
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
+  report.testedBuild.unchangedAfterTest = buildFingerprint(await hashDirectory(dist)) === report.testedBuild.fingerprint;
+  if (!report.testedBuild.unchangedAfterTest) { report.error ||= 'Production build changed during UI tests'; process.exitCode = 1; }
   await fs.writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 }

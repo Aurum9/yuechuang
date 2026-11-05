@@ -7,6 +7,8 @@ import {
 } from './context-shared';
 import { readConfig } from './store';
 import { savePhrase } from './phrases';
+import { getChatConnectionView } from './chat-connection';
+import { requestSiwc } from './siwc-background';
 
 interface ContextJob {
   id: string; tabId: number; frameId: number; documentId?: string; url?: string;
@@ -184,18 +186,24 @@ async function run(job: ContextJob) {
   try {
     await verifyDocument(job); current(job);
     await configurationReady?.(); current(job);
+    const { config: connection } = await getChatConnectionView(); current(job);
     const config = await readConfig(); current(job);
-    if (!config.settings.baseUrl || !config.settings.model || !config.key) throw new Error('请先在阅窗设置中填写接口、模型和 API Key。');
-    if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在阅窗设置中授权。');
-    current(job);
-    planContextRequest(config.settings, job.mode, job.snapshot, job.kind, job.coreText);
+    if (connection.provider === 'apiKey') {
+      if (!config.settings.baseUrl || !config.settings.model || !config.key) throw new Error('请先在阅窗设置中填写接口、模型和 API Key。');
+      if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在阅窗设置中授权。');
+      current(job);
+    }
+    const plan = planContextRequest(config.settings, job.mode, job.snapshot, job.kind, job.coreText);
     beforeRequest?.();
     current(job); await verifyDocument(job); current(job);
     job.state = { ...job.state, status: 'running', text: job.coreText, error: undefined }; emit(job);
-    const text = await generateContextAnswer(config.settings, config.key, job.mode, job.snapshot, job.controller.signal, text => {
+    const onText = (text: string) => {
       if (jobs.get(job.tabId) !== job || job.controller.signal.aborted) return;
       job.state = answerState(job, text); emit(job);
-    }, job.kind, job.coreText);
+    };
+    const text = connection.provider === 'chatgptOAuth'
+      ? await requestSiwc(plan.messages, job.controller.signal, onText, undefined, 'context')
+      : await generateContextAnswer(config.settings, config.key, job.mode, job.snapshot, job.controller.signal, onText, job.kind, job.coreText);
     current(job); await verifyDocument(job); current(job);
     job.state = { ...answerState(job, text), status: 'done', canExpand: job.kind === 'core' && !!job.state.exampleKind }; emit(job);
   } catch (error) {

@@ -2,7 +2,7 @@ import './options.css';
 import './panel-embed';
 import { DEFAULT_SETTINGS, type Settings, type SettingsView } from './shared';
 import type { ChatConnectionConfig, ChatConnectionView } from './chat-connection-shared';
-import { SIWC_API_ORIGIN, siwcStatusText, type SiwcView } from './siwc-shared';
+import { SIWC_API_ORIGIN, SIWC_AUTH_ORIGINS, siwcStatusText, type SiwcView } from './siwc-shared';
 import { formatSiwcDiagnostics, siwcDiagnosticText } from './siwc-diagnostics';
 
 type Response = { ok: true; [key: string]: unknown } | { ok: false; error: string };
@@ -38,7 +38,6 @@ const connectionForm = element<HTMLFormElement>('connection-form');
 const apiConnection = element<HTMLInputElement>('connection-api');
 const oauthConnection = element<HTMLInputElement>('connection-oauth');
 const oauthModel = element<HTMLSelectElement>('siwc-model');
-element<HTMLInputElement>('siwc-extension-id').value = chrome.runtime.id;
 let connectionView: ChatConnectionView | undefined;
 let siwcView: SiwcView | undefined;
 let connectionBusy = false;
@@ -286,7 +285,6 @@ function renderSiwc(view: SiwcView, replaceChoice: boolean): void {
   element('siwc-diagnostic').textContent = diagnosticText;
   element('siwc-diagnostic').hidden = !diagnosticText;
   element('siwc-diagnostic').classList.toggle('is-error', view.status.generation === 'blocked');
-  element('siwc-helper-help').hidden = !!view.status.helperVersion && view.status.state !== 'helperMissing';
   element('siwc-logout-notice').hidden = view.status.remoteRevoked !== false || view.status.loggedIn;
   updateConnectionControls();
 }
@@ -330,25 +328,25 @@ connectionForm.addEventListener('submit', event => {
       renderConnection({ config: view.config }, true);
       renderSiwc(view, true);
       notifyConnectionChanged();
-      connectionReport('已保存 ChatGPT 订阅连接。请到「对话」发送问题验证；正常聊天无需保留官网标签页。当前正在生成的回答会停止。');
+      connectionReport('已保存 ChatGPT 订阅连接。侧栏对话和划词查阅使用所选模型。切换连接会停止正在生成的回答。');
       return;
     }
     const view = await connectionMessage('connection:save', { config });
     renderConnection(view, true);
     notifyConnectionChanged();
-    connectionReport('已切换为模型 API。侧栏对话使用下方保存的接口与 Key。');
+    connectionReport('已切换为模型 API。侧栏对话和划词查阅使用下方保存的接口与 Key。');
   });
 });
 
 function requestSiwc(type: 'siwc:login' | 'siwc:refresh', newAccount = false): void {
   if (busy || connectionBusy || !connectionLoaded) return;
   // Keep the optional API permission request inside the trusted button gesture.
-  const grant = chrome.permissions.request({ origins: [`${SIWC_API_ORIGIN}/*`] });
+  const grant = chrome.permissions.request({ origins: [...SIWC_AUTH_ORIGINS] });
   void performConnection(async () => {
-    if (!await grant) throw new Error('尚未获得 OpenAI 官方 API 访问权限。请再次点击并授权。');
+    if (!await grant) throw new Error('尚未获得 OpenAI 登录、API 和本机登录回调权限。请再次点击并授权。');
     siwcAuthorizing = type === 'siwc:login';
     updateConnectionControls();
-    connectionReport(type === 'siwc:login' ? '请在打开的 OpenAI 页面完成登录，并授权套餐用量。完成后会返回这里，尚未发送聊天问题。' : '正在检查本地助手、授权状态和可用模型…');
+    connectionReport(type === 'siwc:login' ? '请在打开的 OpenAI 页面完成登录，并授权套餐用量。完成后会返回这里，尚未发送聊天问题。' : '正在检查登录授权和可用模型…');
     try {
       const view = await siwcMessage(type, newAccount ? { newAccount: true } : {});
       renderSiwc(view, false);
@@ -367,14 +365,6 @@ element('siwc-copy-diagnostics').addEventListener('click', () => {
   void navigator.clipboard.writeText(text).then(() => {
     connectionReport('已复制连接诊断，仅含版本、授权状态和响应结构，不含账号、凭证或对话内容。');
   }).catch(() => connectionReport('复制连接诊断失败，请允许剪贴板访问后重试。', true));
-});
-element('siwc-copy-id').addEventListener('click', () => {
-  void navigator.clipboard.writeText(chrome.runtime.id).then(() => {
-    connectionReport('已复制当前阅窗扩展 ID，可粘贴到本地助手安装命令中。');
-  }).catch(() => {
-    element<HTMLInputElement>('siwc-extension-id').select();
-    connectionReport('复制未完成，已选中扩展 ID，可手动复制。', true);
-  });
 });
 element('siwc-cancel').addEventListener('click', () => {
   if (busy || siwcCancelling || !siwcAuthorizing && !siwcView?.status.loginPending) return;
@@ -395,13 +385,13 @@ element('siwc-logout').addEventListener('click', () => {
     try { view = await siwcMessage('siwc:logout'); }
     catch (error) {
       notifyConnectionChanged();
-      connectionReport(`${error instanceof Error ? error.message : '本地助手退出操作未完成。'}尚未确认本机凭证已清除，请检查助手后重试。`, true);
+      connectionReport(`${error instanceof Error ? error.message : '退出账号操作未完成。'}尚未确认本机凭证已清除，请检查扩展存储后重试。`, true);
       return;
     }
     renderSiwc(view, false);
     notifyConnectionChanged();
     if (view.status.state !== 'signedOut') {
-      connectionReport(`${view.status.error || siwcStatusText(view.status)}。尚未确认本机凭证已清除，请检查助手后重试。`, true);
+      connectionReport(`${view.status.error || siwcStatusText(view.status)}。尚未确认本机凭证已清除，请检查扩展存储后重试。`, true);
       return;
     }
     connectionReport(view.status.remoteRevoked

@@ -7,6 +7,10 @@ import { hashDirectory, buildFingerprint, sha256 } from './artifact-hashes.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await readFile(path.join(root, 'dist', 'manifest.json'), 'utf8'));
+if (manifest.permissions.includes('alarms') && !manifest.permissions.includes('nativeMessaging')) {
+  await import('./verify-extension-oauth.mjs');
+  process.exit(0);
+}
 if (manifest.permissions.includes('nativeMessaging')) {
   await import('./verify-siwc-trial.mjs');
   process.exit(0);

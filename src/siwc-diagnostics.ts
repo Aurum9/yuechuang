@@ -1,15 +1,15 @@
 import { SIWC_DIAGNOSTIC_EVENTS, SIWC_DIAGNOSTIC_KEYS, SIWC_DIAGNOSTIC_REASONS, SIWC_VALUE_TYPES, type SiwcDiagnostic, type SiwcView } from './siwc-shared';
 
-const stages = ['preflight', 'helper', 'models', 'headers', 'event', 'completion', 'stream'] as const;
+const stages = ['preflight', 'credentials', 'models', 'headers', 'event', 'completion', 'stream'] as const;
 const contentTypes = ['text/event-stream', 'application/json', 'text/html', 'other', 'missing'] as const;
 const responseStatuses = ['missing', 'queued', 'in_progress', 'completed', 'failed', 'incomplete', 'cancelled', 'other'] as const;
-const states = ['unchecked', 'helperMissing', 'signedOut', 'ready', 'planDenied', 'reauthRequired', 'permissionRequired', 'error'] as const;
-const stageLabels: Record<SiwcDiagnostic['stage'], string> = { preflight: '请求准备', helper: '本地助手', models: '模型列表', headers: '响应头', event: '流式事件', completion: '回答完成检查', stream: '响应流' };
+const states = ['unchecked', 'signedOut', 'ready', 'planDenied', 'reauthRequired', 'permissionRequired', 'error'] as const;
+const stageLabels: Record<SiwcDiagnostic['stage'], string> = { preflight: '请求准备', credentials: '登录凭证', models: '模型列表', headers: '响应头', event: '流式事件', completion: '回答完成检查', stream: '响应流' };
 const reasonLabels: Record<NonNullable<SiwcDiagnostic['reason']>, string> = {
   requestInvalid: '请求结构不符合要求', nonEventStream: '未收到预期的流式响应', invalidJson: '事件内容无法解析', invalidEvent: '事件结构不符合要求',
   responseChanged: '同一响应中的标识发生变化', invalidDelta: '文本片段结构不符合要求', terminalResponseMissing: '结束事件缺少响应信息',
   terminalStatus: '结束事件的状态不符合要求', emptyText: '未收到可显示的回答文本', eventTooLarge: '单个事件超过大小上限', streamTooLarge: '响应超过大小上限',
-  streamEnded: '响应在完成前结束', modelCatalog: '模型列表结构不符合要求', nativeFailure: '本地助手操作未完成', httpError: '官方接口返回错误',
+  streamEnded: '响应在完成前结束', modelCatalog: '模型列表结构不符合要求', authFailure: '登录授权操作未完成', httpError: '官方接口返回错误',
   timeout: '请求超时', unknown: '响应结构尚待确认',
 };
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);

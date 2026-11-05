@@ -19,12 +19,13 @@ npx playwright install chromium
 npm run test:siwc-ui
 ```
 
-Windows 助手使用 `helper/go.mod` 指定的 Go 版本：
+纯扩展 OAuth 的真实 MV3 事件回归：
 
-```powershell
-.\scripts\helper-build.ps1
-.\scripts\helper-smoke.ps1
+```sh
+npm run test:siwc-auth
 ```
+
+`helper/` 是旧版本的历史实现，当前扩展不依赖它。
 
 测试使用合成凭证和本机服务。提交时说明验证范围；模拟通过与真实账号、原生侧栏的人工验收分别记录。
 

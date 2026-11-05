@@ -1,6 +1,6 @@
 # 阅窗
 
-一个使用自己模型接口的 Chrome 阅读助手，把侧栏对话、划词查阅、链接预览和资料整理放在浏览器里。当前版本 **0.13.0**，适合个人使用和小范围试用。
+一个使用自己模型接口的 Chrome 阅读助手，把侧栏对话、划词查阅、链接预览和资料整理放在浏览器里。当前版本 **0.14.1**，适合个人使用和小范围试用。
 
 项目没有应用云端服务器。模型请求直达你选择的服务商，收藏和保存的研究报告留在本机。
 
@@ -19,27 +19,26 @@
 | | 模型 API | ChatGPT 订阅（官方登录） |
 | --- | --- | --- |
 | 使用凭证 | 自己的服务商 API Key | 自己的 ChatGPT 账号及套餐用量授权 |
-| 当前覆盖 | 侧栏对话、划词、摘要、跨页研究 | 侧栏对话 |
-| 额外组件 | 无 | Windows x64 本地助手 |
+| 当前覆盖 | 侧栏对话、划词、摘要、跨页研究 | 侧栏对话、划词翻译、解释和例句 |
+| 额外组件 | 无 | 无，直接在扩展中登录 |
 | 用量归属 | 所填 API 接口对应的余额或额度 | 账号实际获准使用的套餐用量 |
 
-API 模式支持兼容 Chat Completions 的流式文本接口，具体兼容性取决于服务商。官方订阅连接通过阅窗自身的授权流程登录，侧栏直接调用 OpenAI Responses API；授权完成后无需保留 ChatGPT 网页标签。它会提供联网搜索工具，由模型按问题决定是否使用。
+API 模式支持兼容 Chat Completions 的流式文本接口，具体兼容性取决于服务商。官方订阅连接通过阅窗自身的授权流程登录，侧栏对话和划词查阅直接调用 OpenAI Responses API。侧栏对话会提供联网搜索工具，由模型按问题决定是否使用。
 
-官方订阅的资格、模型列表和额度以账号实际授权为准。使用订阅聊天时，划词、摘要和研究仍需另外配置 API。旧「ChatGPT 网页」模式已从 0.13.0 生产包移除。
+官方订阅的资格、模型列表和额度以账号实际授权为准。文章摘要和跨页研究使用模型 API 配置。旧「ChatGPT 网页」模式已从 0.13.0 生产包移除。
 
 ## 安装试用
 
-优先支持 **Windows x64 + Chrome 120 或更新版本**。当前采用开发者模式手动安装，尚未通过 Chrome 应用商店发布。助手成品只提供 Windows x64，其他系统和浏览器的助手安装暂未适配。
+面向 **Windows / macOS + Chrome 120 或更新版本**，两端使用同一个扩展包，不需要本地助手或 PowerShell。当前采用开发者模式手动安装，尚未通过 Chrome 应用商店发布。自动化浏览器验证不代表两个系统都已完成真实账号人工验收。
 
 准备对应版本的发行附件：
 
-- `reading-assistant-0.13.0.zip`：所有人需要的扩展包。
-- `yuechuang-helper-0.13.0.zip`：仅使用 ChatGPT 订阅时需要的本地助手包。
+- `reading-assistant-0.14.1.zip`：所有人需要的扩展包。
 
 1. 将扩展 ZIP 解压到固定目录，保留该目录。
 2. 打开 `chrome://extensions`，开启「开发者模式」，点击「加载已解压的扩展程序」，选择直接包含 `manifest.json` 的目录。源码构建则选择 `dist`。
 3. 点击阅窗图标进入侧栏，在「设置」中选择连接。API 模式填写自己的接口地址、模型标识和 Key，并授权接口域名。
-4. 使用官方订阅时，复制自己安装后的扩展 ID，按[助手安装说明](docs/本地助手安装使用.md)安装、登录、选择实际返回的模型并保存。助手无需管理员权限，由 Chrome 按需启动。
+4. 使用官方订阅时，点击「使用 ChatGPT 登录」，允许登录域、API 和本机回调域权限，在 OpenAI 页面亲自登录并授权套餐用量，返回后选择模型并保存。
 5. 需要划词或预览时，先授权所读网站，再刷新网页。普通侧栏聊天不自动读取当前页面。
 
 普通「保存连接」不调用模型；「保存并测试连接」会实际调用一次模型。更新时将新版完整解压到原扩展目录，点击扩展卡片「重新加载」，重开侧栏并刷新来源网页。当前没有自动更新。
@@ -48,7 +47,7 @@ API 模式支持兼容 Chat Completions 的流式文本接口，具体兼容性�
 
 ## 开发与构建
 
-需要 **Node.js 22.12+**。运行成品扩展无需 Node.js；运行成品助手无需 Go。
+需要 **Node.js 22.12+**。运行成品扩展无需 Node.js、Go 或 Python。
 
 ```powershell
 npm ci
@@ -65,6 +64,7 @@ npm run test:phrases
 npm run test:research
 npm run test:sidebar
 npm run test:siwc-ui
+npm run test:siwc-auth
 ```
 
 `npm run test:e2e` 保留第一阶段预览与摘要回归；`test:webchat*` 保留旧网页连接的历史检查，不用于证明当前官方订阅连接可用。测试报告和截图输出到 `test-results`。
@@ -75,25 +75,17 @@ npm run test:siwc-ui
 npm run package
 ```
 
-助手源码位于 `helper`，需要符合 `helper/go.mod` 要求的 Go 工具链（当前为 Go 1.26）。在 Windows PowerShell 中构建和打包：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\helper-build.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\helper-smoke.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\helper-package.ps1 -SkipBuild
-```
-
-助手构建默认先运行 Go 测试；烟测使用工作区临时文件，不安装助手或发起登录。发行前的 `npm run verify:release` 需要完整的对应版本测试证据、扩展包和助手包，具体流程见[开发说明](docs/开发说明.md)。
+`helper/` 和 `scripts/helper-*` 保留为 0.10—0.13 版本的历史实现，当前扩展不连接、安装或分发助手。当前发行核验使用 `npm run verify:release` 检查扩展 ZIP 与对应版本测试证据，详见[纯扩展授权说明](docs/纯扩展授权方案.md)。
 
 ## 隐私与数据
 
 - **发送给模型的内容**：聊天问题及已完成历史；划词原文和邻近语境；主动总结或研究的网页正文。远程服务商自身的数据处理规则仍适用。
 - **API Key**：默认仅存本次浏览器会话，勾选记住后存本机扩展存储；持久 Key 当前没有额外的应用层加密。Key 不进入网页内容脚本、导出或诊断。
-- **官方授权凭证**：由本地助手使用 Windows DPAPI 加密保存；访问令牌仅暂存扩展后台内存。官方请求使用 `store: false`，不自动同步 ChatGPT 官网历史或记忆。
+- **官方授权凭证**：保存在当前浏览器的 `chrome.storage.local`，限制为扩展可信上下文访问；不云同步、不导出，当前没有操作系统钥匙串或额外应用层加密。登录中的 PKCE 事务存于 `chrome.storage.session`，可跨后台休眠恢复。官方请求使用 `store: false`，不自动同步 ChatGPT 官网历史或记忆。
 - **聊天记录**：保存在 `chrome.storage.session`，可在同一浏览器会话重新打开查看，重启浏览器后清除。
 - **收藏和报告**：明确保存后写入 `chrome.storage.local`，可导出；卸载扩展或清除扩展数据会丢失。
 
-没有云同步、统计上报、统一账号或共享额度服务。请勿上传真实 Key、Token、授权回调链接、助手凭证或整个 Chrome 用户目录。
+没有云同步、统计上报、统一账号或共享额度服务。请勿上传真实 Key、Token、授权回调链接、扩展凭证或整个 Chrome 用户目录。
 
 ## 当前限制
 
@@ -107,7 +99,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\helper-package
 ## 文档
 
 - [安装与使用说明](docs/安装与使用说明.md)
-- [本地助手安装、更新与卸载](docs/本地助手安装使用.md)
+- [纯扩展授权、存储边界与升级](docs/纯扩展授权方案.md)
 - [开发说明](docs/开发说明.md)
 - [最初需求与技术方案](docs/需求与技术方案.md)
 - [开发历史、详细使用说明与验收索引](docs/开发历史与验收索引.md)

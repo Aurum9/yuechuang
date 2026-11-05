@@ -8,10 +8,10 @@ class Hub { listeners: ((...args: any[]) => any)[] = []; addListener = (fn: (...
 const listener = new Hub();
 const connected = new Hub();
 const local: Loose = {}, session: Loose = {};
-const nativeCommands: string[] = [], requests: { url: string; init: RequestInit }[] = [];
-const nativeSecret = 'siwc-synthetic-access-token-DO-NOT-USE';
+const authCommands: string[] = [], requests: { url: string; init: RequestInit }[] = [];
+const authSecret = 'siwc-synthetic-access-token-DO-NOT-USE';
 const account = { id: 'account-1', label: 'Synthetic account', planAuthorized: true };
-let nativeStatus: Loose = { version: '0.1.0', state: 'ready', account, accounts: [account], loginPending: false };
+let authStatus: Loose = { version: '0.1.0', state: 'ready', account, accounts: [account], loginPending: false };
 let failStream = false, permission = true;
 let holdLogin: ((value: unknown) => void) | undefined;
 let portCount = 0;
@@ -24,21 +24,7 @@ const extensionId = 'a'.repeat(32);
 const api = {
   runtime: {
     id: extensionId, getURL: (file: string) => `chrome-extension://${extensionId}/${file}`, onMessage: listener, onConnect: connected,
-    connectNative: (host: string) => {
-      assert.equal(host, 'com.yuechuang.helper'); portCount++;
-      const onMessage = new Hub(), onDisconnect = new Hub(); let closed = false;
-      return { onMessage, onDisconnect, disconnect: () => { if (!closed) { closed = true; portCount--; onDisconnect.emit(); } },
-        postMessage: ({ id, command }: Loose) => {
-          nativeCommands.push(command);
-          if (command === 'getAccessToken' && holdCredential) return;
-          if (command === 'login') { holdLogin = value => { if (!closed) onMessage.emit({ id, ok: true, result: value }); }; return; }
-          queueMicrotask(() => {
-            if (command === 'logout' && failLogout) { if (!closed) onMessage.emit({ id, ok: false, error: { code: 'internalError', message: nativeSecret } }); return; }
-            const result = command === 'getAccessToken' ? { accessToken: nativeSecret, expiresAt: Date.now() + 3600_000, accountId: 'account-1' } : command === 'logout' ? { version: '0.1.0', state: 'signedOut', remoteRevocationConfirmed: false } : nativeStatus;
-            if (!closed) onMessage.emit({ id, ok: true, result });
-          });
-        } };
-    },
+
   },
   storage: {
     local: { setAccessLevel: async () => {}, get: async (key: string | string[]) => Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, structuredClone(local[name])])), set: async (value: Loose) => Object.assign(local, structuredClone(value)) },
@@ -49,14 +35,36 @@ const api = {
 Object.assign(globalThis, { chrome: api });
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input); requests.push({ url, init });
-  assert.equal((init.headers as Loose).Authorization, `Bearer ${nativeSecret}`);
+  assert.equal((init.headers as Loose).Authorization, `Bearer ${authSecret}`);
   assert.equal(init.credentials, 'omit'); assert.equal(init.redirect, 'error');
   if (url === 'https://api.openai.com/v1/models') { await holdModels; return Response.json({ models: [{ slug: 'gpt-example', display_name: 'Example', visibility: 'list' }] }); }
   assert.equal(url, 'https://api.openai.com/v1/responses');
   assert.equal((init.headers as Loose).Accept, 'text/event-stream');
   if (customResponse) return customResponse();
-  const events = [{ type: 'response.created', response: { id: 'response-1' } }, { type: 'response.output_text.delta', delta: '连接成功' }, failStream ? { type: 'response.failed', response: { error: { code: 'subscription_sharing_usage_limit_exceeded', message: nativeSecret } } } : { type: 'response.completed', response: { id: 'response-1', status: malformedTerminal ? 'unknown-private-value' : 'completed', privateSecret: nativeSecret } }];
+  const events = [{ type: 'response.created', response: { id: 'response-1' } }, { type: 'response.output_text.delta', delta: '连接成功' }, failStream ? { type: 'response.failed', response: { error: { code: 'subscription_sharing_usage_limit_exceeded', message: authSecret } } } : { type: 'response.completed', response: { id: 'response-1', status: malformedTerminal ? 'unknown-private-value' : 'completed', privateSecret: authSecret } }];
   return new Response(events.map(value => `data: ${JSON.stringify(value)}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } });
+};
+const { siwcAuth } = await import('../src/siwc-auth');
+siwcAuth.initialize = () => {};
+siwcAuth.call = async (command, signal) => {
+  signal?.throwIfAborted(); authCommands.push(command);
+  if (command === 'cancelLogin') return {};
+  if (command === 'logout' && failLogout) throw new SiwcFailure('auth');
+  if (command === 'login' || command === 'getAccessToken' && holdCredential) {
+    portCount++;
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = (value?: unknown, error?: unknown) => {
+        if (done) return; done = true; portCount--; signal?.removeEventListener('abort', abort);
+        error ? reject(error) : resolve(value);
+      };
+      const abort = () => finish(undefined, new DOMException('Aborted', 'AbortError'));
+      signal?.addEventListener('abort', abort, { once: true });
+      if (command === 'login') holdLogin = value => finish(value);
+    });
+  }
+  return command === 'getAccessToken' ? { accessToken: authSecret, expiresAt: Date.now() + 3600_000, accountId: 'account-1' }
+    : command === 'logout' ? { state: 'signedOut', remoteRevocationConfirmed: false } : authStatus;
 };
 const manager = await import('../src/siwc-background');
 manager.initializeSiwc(); manager.initializeSiwc();
@@ -68,23 +76,23 @@ const messages: CompletionMessage[] = [{ role: 'system', content: '用中文。'
 
 test('passive views launch no helper and foreign pages cannot invoke authentication', async () => {
   assert.equal(listener.listeners.length, 1);
-  const view = await message('siwc:get'); assert.equal(view.view.status.state, 'unchecked'); assert.equal(nativeCommands.length, 0);
+  const view = await message('siwc:get'); assert.equal(view.view.status.state, 'ready'); assert.deepEqual(authCommands, ['status']);
   for (const source of [{ ...sender, id: 'other' }, { ...sender, url: 'https://example.test/' }, { ...sender, frameId: 2 }, { ...sender, origin: 'https://example.test' }]) assert.equal((await message('siwc:login', {}, source)).ok, false);
-  assert.equal(nativeCommands.length, 0); assert.equal(requests.length, 0);
+  assert.deepEqual(authCommands, ['status']); assert.equal(requests.length, 0);
 });
 test('verified identity without plan permission makes no API request', async () => {
-  nativeStatus = { ...nativeStatus, state: 'planDenied', account: { ...account, planAuthorized: false } };
+  authStatus = { ...authStatus, state: 'planDenied', account: { ...account, planAuthorized: false } };
   const result = await message('siwc:refresh');
   assert.equal(result.view.status.loggedIn, true); assert.equal(result.view.status.planAuthorized, false); assert.equal(result.view.status.state, 'planDenied');
   assert.equal(requests.length, 0); assert.equal(portCount, 0);
 });
 test('official account check reads models without generating and config stores no secrets', async () => {
-  nativeStatus = { ...nativeStatus, state: 'ready', account };
+  authStatus = { ...authStatus, state: 'ready', account };
   const result = await message('siwc:refresh'); assert.equal(result.view.status.state, 'ready'); assert.equal(result.view.status.generation, 'unchecked');
   assert.deepEqual(requests.map(item => item.url), ['https://api.openai.com/v1/models']);
   const saved = await message('siwc:save', { config: { provider: 'chatgptOAuth', model: 'gpt-example', accessToken: 'ignored' } });
   assert.equal(saved.ok, true); assert.deepEqual(local.webChatConfig, { provider: 'chatgptOAuth', model: 'gpt-example' });
-  assert.ok(!JSON.stringify([saved, local, session]).includes(nativeSecret)); assert.equal(portCount, 0);
+  assert.ok(!JSON.stringify([saved, local, session]).includes(authSecret)); assert.equal(portCount, 0);
 });
 test('chat calls only public Responses and establishes success after terminal completion', async () => {
   const parts: string[] = [];
@@ -93,20 +101,20 @@ test('chat calls only public Responses and establishes success after terminal co
   assert.equal((await manager.getSiwcView()).status.generation, 'working');
   const request = requests.at(-1)!; const body = JSON.parse(request.init.body as string);
   assert.equal(body.instructions, '用中文。'); assert.equal(body.store, false); assert.equal(body.stream, true); assert.ok(!body.messages);
-  assert.equal(portCount, 0); assert.ok(!JSON.stringify([local, session, await manager.getSiwcView()]).includes(nativeSecret));
+  assert.equal(portCount, 0); assert.ok(!JSON.stringify([local, session, await manager.getSiwcView()]).includes(authSecret));
 });
 test('partial usage failure does not retry or report success, secrets never enter diagnostics', async () => {
   failStream = true; const count = requests.length;
-  await assert.rejects(manager.requestSiwc(messages, new AbortController().signal, () => {}), (error: unknown) => error instanceof SiwcFailure && error.code === 'quota' && !error.message.includes(nativeSecret));
+  await assert.rejects(manager.requestSiwc(messages, new AbortController().signal, () => {}), (error: unknown) => error instanceof SiwcFailure && error.code === 'quota' && !error.message.includes(authSecret));
   assert.equal(requests.length, count + 1); assert.equal((await manager.getSiwcView()).status.generation, 'blocked');
-  assert.ok(!JSON.stringify(await manager.getSiwcView()).includes(nativeSecret)); failStream = false;
+  assert.ok(!JSON.stringify(await manager.getSiwcView()).includes(authSecret)); failStream = false;
 });
-test('login cancellation works while authorization is pending and closes the native port', async () => {
+test('login cancellation works while authorization is pending and cancels the authorization attempt', async () => {
   const pending = message('siwc:login');
   await new Promise(resolve => setTimeout(resolve, 5)); assert.equal((await manager.getSiwcView()).status.loginPending, true);
   const cancelled = await message('siwc:cancel'); await pending;
-  assert.equal(cancelled.view.status.loginPending, undefined); assert.equal(portCount, 0);
-  holdLogin?.(nativeStatus); assert.equal((await manager.getSiwcView()).status.loggedIn, false);
+  assert.equal(cancelled.view.status.loginPending, false); assert.equal(portCount, 0);
+  holdLogin?.(authStatus); assert.equal((await manager.getSiwcView()).status.loggedIn, true);
 });
 test('missing API permission performs no model call and logout reports unconfirmed remote revoke', async () => {
   permission = false; const count = requests.length;
@@ -130,17 +138,28 @@ test('real chat controller routes two local turns through the official API witho
   assert.deepEqual(body.input.map((item: Loose) => item.role), ['user', 'assistant', 'user']);
   assert.equal(body.input[0].content, '第一问'); assert.equal(body.input[2].content, '第二问');
   assert.equal(sent.at(-1)?.siwcStatus.generation, 'working');
-  assert.ok(!JSON.stringify([sent, local, session]).includes(nativeSecret));
+  assert.ok(!JSON.stringify([sent, local, session]).includes(authSecret));
   port.disconnect();
 });
-test('stopping while waiting for a native credential closes its host without sending a model request', async () => {
+test('stopping a lookup while it waits for credentials leaves the pending chat independent', async () => {
   manager.clearSiwcAccessToken(); holdCredential = true;
-  const count = requests.length, controller = new AbortController();
-  const pending = manager.requestSiwc(messages, controller.signal, () => {});
-  await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(portCount, 1);
-  controller.abort();
-  await assert.rejects(pending, (error: unknown) => error instanceof DOMException && error.name === 'AbortError');
-  assert.equal(portCount, 0); assert.equal(requests.length, count); holdCredential = false;
+  const count = requests.length;
+  const lookup = new AbortController(), chat = new AbortController();
+  const pendingLookup = manager.requestSiwc(messages, lookup.signal, () => {}, undefined, 'context');
+  const pendingChat = manager.requestSiwc(messages, chat.signal, () => {});
+  try {
+    for (let i = 0; portCount < 2 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 1));
+    assert.equal(portCount, 2);
+    lookup.abort();
+    await assert.rejects(pendingLookup, { name: 'AbortError' });
+    assert.equal(portCount, 1);
+    chat.abort();
+    await assert.rejects(pendingChat, { name: 'AbortError' });
+    assert.equal(portCount, 0); assert.equal(requests.length, count);
+  } finally {
+    lookup.abort(); chat.abort(); holdCredential = false;
+    await Promise.allSettled([pendingLookup, pendingChat]);
+  }
 });
 test('changing configuration cancels an outstanding login and clears the pending flag', async () => {
   const pending = message('siwc:login');
@@ -148,10 +167,10 @@ test('changing configuration cancels an outstanding login and clears the pending
   manager.clearSiwcAccessToken(); await pending;
   assert.equal((await manager.getSiwcView()).status.loginPending, false); assert.equal(portCount, 0);
 });
-test('a failed native logout cannot claim local credentials were cleared', async () => {
+test('a failed credential logout cannot claim local credentials were cleared', async () => {
   failLogout = true;
   const result = await message('siwc:logout');
-  assert.equal(result.ok, false); assert.ok(!result.error.includes(nativeSecret));
+  assert.equal(result.ok, false); assert.ok(!result.error.includes(authSecret));
   assert.notEqual((await manager.getSiwcView()).status.state, 'signedOut');
   failLogout = false;
 });
@@ -165,7 +184,7 @@ test('format diagnostics pinpoint terminal shape without server text, identifier
   assert.ok(!JSON.stringify(view.status.diagnostic).includes('unknown-private-value'));
   assert.ok(!JSON.stringify(view.status.diagnostic).includes('response-1'));
   assert.ok(!JSON.stringify(view.status.diagnostic).includes('privateSecret'));
-  assert.ok(!JSON.stringify(view.status.diagnostic).includes(nativeSecret)); malformedTerminal = false;
+  assert.ok(!JSON.stringify(view.status.diagnostic).includes(authSecret)); malformedTerminal = false;
 });
 
 // Byte streams avoid Response(string)'s automatic text/plain header. Splitting
@@ -213,14 +232,14 @@ test('missing Content-Type does not accept HTML, plain JSON or empty HTTP 200 bo
 test('missing Content-Type preserves terminal quota failures and partial text without retry', async () => {
   customResponse = () => responseWithoutType(sse(
     { type: 'response.output_text.delta', delta: '已收到的片段' },
-    { type: 'response.failed', response: { status: 'failed', error: { code: 'subscription_sharing_usage_limit_exceeded', message: nativeSecret } } },
+    { type: 'response.failed', response: { status: 'failed', error: { code: 'subscription_sharing_usage_limit_exceeded', message: authSecret } } },
   ));
   try {
     const count = requests.length, parts: string[] = [];
     await assert.rejects(manager.requestSiwc(messages, new AbortController().signal, text => parts.push(text)), (error: unknown) => error instanceof SiwcFailure && error.code === 'quota');
     assert.equal(parts.at(-1), '已收到的片段'); assert.equal(requests.length, count + 1);
     const view = await manager.getSiwcView(); assert.equal(view.status.generation, 'blocked'); assert.equal(view.status.diagnostic?.contentType, 'missing');
-    assert.equal(view.status.diagnostic?.eventType, 'response.failed'); assert.ok(!JSON.stringify(view).includes(nativeSecret));
+    assert.equal(view.status.diagnostic?.eventType, 'response.failed'); assert.ok(!JSON.stringify(view).includes(authSecret));
   } finally { customResponse = undefined; }
 });
 
@@ -250,10 +269,10 @@ test('an explicitly incompatible Content-Type remains rejected before any body r
   }
 });
 
-test('opening or reconnecting chat during an assistant refresh waits for the current model check', async () => {
+test('opening or reconnecting chat during an authorization refresh waits for the current model check', async () => {
   let release!: () => void;
   holdModels = new Promise<void>(resolve => { release = resolve; });
-  const callsBefore = requests.length, commandsBefore = nativeCommands.length;
+  const callsBefore = requests.length, commandsBefore = authCommands.length;
   const refreshing = manager.refreshSiwc();
   try {
     for (let i = 0; requests.length === callsBefore && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 1));
@@ -268,7 +287,7 @@ test('opening or reconnecting chat during an assistant refresh waits for the cur
     const [view, current] = await Promise.all([ready, refreshing]);
     assert.equal(view.status.state, 'ready'); assert.deepEqual(view.status.models, current.status.models);
     assert.equal(view.status.models[0].id, 'gpt-example'); assert.equal(requests.length, callsBefore + 1);
-    assert.deepEqual(nativeCommands.slice(commandsBefore), ['status', 'getAccessToken']);
+    assert.deepEqual(authCommands.slice(commandsBefore), ['status', 'getAccessToken']);
   } finally { release(); holdModels = undefined; await refreshing; }
 });
 
@@ -279,15 +298,15 @@ test('passive chat recovery during official authorization cannot cancel or repla
   try {
     for (let i = 0; !(await manager.getSiwcView()).status.loginPending && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 1));
     assert.equal((await manager.getSiwcView()).status.loginPending, true);
-    const commandsBefore = nativeCommands.length, callsBefore = requests.length;
+    const commandsBefore = authCommands.length, callsBefore = requests.length;
     const views = await Promise.all([manager.ensureSiwcReady(), manager.ensureSiwcReady()]);
     assert.ok(views.every(view => view.status.loginPending === true));
     connected.emit(port); onMessage.emit({ type: 'chat:status' });
     for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
     assert.equal(sent.at(-1)?.siwcStatus.loginPending, true);
-    assert.equal(nativeCommands.length, commandsBefore); assert.equal(requests.length, callsBefore);
+    assert.equal(authCommands.length, commandsBefore); assert.equal(requests.length, callsBefore);
     assert.equal(portCount, 1);
-    holdLogin?.(nativeStatus);
+    holdLogin?.(authStatus);
     const result = await pending;
     assert.equal(result.ok, true); assert.equal(result.view.status.state, 'ready');
     assert.equal(result.view.status.loginPending, false); assert.equal(portCount, 0);
@@ -306,7 +325,7 @@ test('official chat automatically offers search and checkpoints only safe progre
     { type: 'response.completed', response: { status: 'completed', output: [
       { id: 'search-1', type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'PRIVATE_QUERY' } },
       { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '这是可核实的资料。', annotations: [
-        { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.test/source', title: '资料来源', accessToken: nativeSecret },
+        { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.test/source', title: '资料来源', accessToken: authSecret },
         { type: 'url_citation', start_index: 0, end_index: 4, url: 'javascript:alert(1)', title: '无效来源' },
       ] }] },
     ] } },
@@ -325,19 +344,19 @@ test('official chat automatically offers search and checkpoints only safe progre
     assert.deepEqual(answer.search, { state: 'complete', calls: 1 });
     assert.deepEqual(answer.citations, [{ start: 0, end: 4, url: 'https://example.test/source', title: '资料来源' }]);
     assert.deepEqual(session[CHAT_SESSION_KEY].messages.at(-1).citations, answer.citations);
-    assert.ok(!JSON.stringify([sent, session[CHAT_SESSION_KEY]]).includes(nativeSecret));
+    assert.ok(!JSON.stringify([sent, session[CHAT_SESSION_KEY]]).includes(authSecret));
     assert.ok(!JSON.stringify([sent, session[CHAT_SESSION_KEY]]).includes('PRIVATE_QUERY'));
   } finally { customResponse = undefined; port.disconnect(); }
 });
 
 test('unsupported search capability reports the fixed admission error without automatic retry or logout', async () => {
-  customResponse = () => Response.json({ error: { code: 'subscription_sharing_unsupported_capability', param: 'tools[0].type', message: nativeSecret } }, { status: 400 });
+  customResponse = () => Response.json({ error: { code: 'subscription_sharing_unsupported_capability', param: 'tools[0].type', message: authSecret } }, { status: 400 });
   try {
     const count = requests.length;
-    await assert.rejects(manager.requestSiwc(messages, new AbortController().signal, () => {}), (error: unknown) => error instanceof SiwcFailure && error.code === 'unsupportedCapability' && !error.message.includes(nativeSecret));
+    await assert.rejects(manager.requestSiwc(messages, new AbortController().signal, () => {}), (error: unknown) => error instanceof SiwcFailure && error.code === 'unsupportedCapability' && !error.message.includes(authSecret));
     const view = await manager.getSiwcView();
     assert.equal(requests.length, count + 1); assert.equal(view.status.loggedIn, true); assert.equal(view.status.generation, 'blocked');
-    assert.equal(view.status.diagnostic?.httpStatus, 400); assert.ok(!JSON.stringify(view).includes(nativeSecret));
+    assert.equal(view.status.diagnostic?.httpStatus, 400); assert.ok(!JSON.stringify(view).includes(authSecret));
   } finally { customResponse = undefined; }
 });
 
