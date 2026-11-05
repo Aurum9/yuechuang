@@ -6,11 +6,11 @@ import { sanitizeChatCitations } from './chat-search';
 import { sanitizeChatDetails } from './chat-details';
 
 export const SIWC_ERRORS = {
-  helperMissing: '本地助手未安装、扩展 ID 不匹配或未正确注册，请先运行助手安装程序。',
-  helper: '本地助手操作失败，请检查安装和本机凭证后重试。',
-  signedOut: '请先通过本地助手登录 ChatGPT 并授权套餐用量。',
+  auth: 'ChatGPT 授权操作失败，请检查网络和扩展存储后重试。',
+  authBusy: '已有 ChatGPT 登录正在进行，请完成或取消后重试。',
+  signedOut: '请先在设置中登录 ChatGPT 并授权套餐用量。',
   planDenied: '账号身份已验证，尚未授权 ChatGPT 套餐用量，请重新登录并确认授权。',
-  permission: '请在设置中授权访问 OpenAI 官方 API。',
+  permission: '请在设置中授权访问 OpenAI 登录、API 和本机登录回调。',
   network: 'OpenAI 官方 API 连接失败，请检查网络后手动重试。',
   denied: 'OpenAI 拒绝了本次请求，请检查账号的套餐用量授权。',
   quota: '当前套餐用量或应用用量限制已达到，请查看 ChatGPT 设置中的用量。',
@@ -40,7 +40,7 @@ export function parseSiwcModels(value: unknown): WebChatModel[] {
   if (!result.length) throw new SiwcFailure('model', 'modelCatalog');
   return result;
 }
-export function siwcRequestBody(model: string, messages: CompletionMessage[]) {
+export function siwcRequestBody(model: string, messages: CompletionMessage[], webSearch = true) {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(model) || !Array.isArray(messages) || !messages.length || messages.length > 41) throw new SiwcFailure('format', 'requestInvalid');
   let total = 0;
   for (const item of messages) {
@@ -49,7 +49,12 @@ export function siwcRequestBody(model: string, messages: CompletionMessage[]) {
   }
   if (total > 240_000 || messages.at(-1)?.role !== 'user') throw new SiwcFailure('format', 'requestInvalid');
   const instructions = messages.filter(item => item.role === 'system').map(item => item.content).join('\n\n');
-  return { model, ...(instructions ? { instructions } : {}), input: messages.filter(item => item.role !== 'system').map(item => ({ role: item.role, content: item.content })), store: false, stream: true, tools: [{ type: 'web_search' }], tool_choice: 'auto' };
+  return {
+    model, ...(instructions ? { instructions } : {}),
+    input: messages.filter(item => item.role !== 'system').map(item => ({ role: item.role, content: item.content })),
+    store: false, stream: true,
+    ...(webSearch ? { tools: [{ type: 'web_search' }], tool_choice: 'auto' } : {}),
+  };
 }
 function codeFailure(value: unknown): SiwcFailure | undefined {
   const error = record(value) && record(value.error) ? value.error : value;

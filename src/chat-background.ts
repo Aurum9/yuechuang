@@ -128,7 +128,7 @@ async function send(port: chrome.runtime.Port, input: unknown): Promise<void> {
     const view = await getChatConnectionView(); current(active); active.connection = view.config.provider;
     if (view.config.provider === 'chatgptOAuth') {
       applySiwc(await ensureSiwcReady()); current(active);
-      if (!state.settingsReady) throw new Error(state.siwcStatus?.error || (state.siwcStatus?.state === 'ready' ? '请在设置中选择当前账号可用的模型并保存。' : '请到设置安装本地助手，登录 ChatGPT 并授权套餐用量。'));
+      if (!state.settingsReady) throw new Error(state.siwcStatus?.error || (state.siwcStatus?.state === 'ready' ? '请在设置中选择当前账号可用的模型并保存。' : '请到设置登录 ChatGPT 并授权套餐用量。'));
     } else {
       applyApiKey(key);
       if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置中填写接口地址、模型和 API Key。');

@@ -159,10 +159,9 @@ function updateControls(): void {
   setup.hidden = !loaded || !connected || connectionReady;
   element('chat-setup-heading').textContent = oauth ? '连接 ChatGPT 订阅' : '先连接你的模型';
   element('chat-setup-text').textContent = oauth
-    ? state.siwcStatus?.state === 'helperMissing' ? '请先安装本地助手，再到设置检查助手并完成 ChatGPT 官方登录。'
-      : state.siwcStatus?.loggedIn && !state.siwcStatus.planAuthorized ? '账号身份已验证。请到设置重新登录，授权 ChatGPT 套餐用量后选择模型并保存。'
+    ? state.siwcStatus?.loggedIn && !state.siwcStatus.planAuthorized ? '账号身份已验证。请到设置重新登录，授权 ChatGPT 套餐用量后选择模型并保存。'
         : state.siwcStatus?.planAuthorized ? '请到设置刷新并选择官方 API 返回的可用模型，然后保存对话连接。'
-          : '在设置中选择「ChatGPT 订阅（官方登录）」，通过本地助手授权账号和套餐用量。日常聊天无需保留官网标签页。'
+          : '在设置中选择「ChatGPT 订阅（官方登录）」，直接授权账号和套餐用量。日常聊天无需保留官网标签页。'
     : !state.hasKey ? '在设置中填写接口、模型和 Key，即可开始对话。' : '请在设置中补全模型配置，并授权接口所在的网站。';
   element('chat-empty').hidden = state.messages.length > 0;
   const error = localError || state.error || '';
@@ -355,7 +354,7 @@ function validState(value: unknown): value is ChatState {
   if (candidate.connectionLabel !== undefined && typeof candidate.connectionLabel !== 'string' || candidate.accountLabel !== undefined && typeof candidate.accountLabel !== 'string') return false;
   if (candidate.siwcStatus !== undefined) {
     const status = candidate.siwcStatus;
-    if (!status || typeof status !== 'object' || !['unchecked', 'helperMissing', 'signedOut', 'ready', 'planDenied', 'reauthRequired', 'permissionRequired', 'error'].includes(status.state)
+    if (!status || typeof status !== 'object' || !['unchecked', 'signedOut', 'ready', 'planDenied', 'reauthRequired', 'permissionRequired', 'error'].includes(status.state)
       || typeof status.loggedIn !== 'boolean' || typeof status.planAuthorized !== 'boolean'
       || !['unchecked', 'working', 'blocked'].includes(status.generation)
       || !Array.isArray(status.models) || !status.models.every(model => model && typeof model.id === 'string' && typeof model.label === 'string')

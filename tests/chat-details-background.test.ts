@@ -51,15 +51,7 @@ before(async () => {
   Object.assign(globalThis, { chrome: {
     runtime: {
       id: ID, getURL: (name: string) => `chrome-extension://${ID}/${name}`, onConnect: connected,
-      connectNative() {
-        const onMessage = new Hub<[unknown]>(), onDisconnect = new Hub<[]>();
-        return { onMessage, onDisconnect, disconnect() {}, postMessage({ id, command }: { id: string; command: string }) {
-          const result = command === 'getAccessToken'
-            ? { accessToken: TOKEN, expiresAt: Date.now() + 3600_000, accountId: 'synthetic-account' }
-            : { version: '0.1.0', state: 'ready', account: { id: 'synthetic-account', label: 'Synthetic account', planAuthorized: true } };
-          queueMicrotask(() => onMessage.emit({ id, ok: true, result }));
-        } };
-      }
+
     },
     storage: { local: area(local), session: area(session) },
     permissions: { async contains() { return true; } }
@@ -80,6 +72,10 @@ before(async () => {
     response.headers.delete('Content-Type');
     return response;
   };
+  const { siwcAuth } = await import('../src/siwc-auth');
+  siwcAuth.call = async command => command === 'getAccessToken'
+    ? { accessToken: TOKEN, expiresAt: Date.now() + 3600_000, accountId: 'synthetic-account' }
+    : { state: 'ready', account: { id: 'synthetic-account', label: 'Synthetic account', planAuthorized: true } };
   await (await import('../src/chat-background')).initializeChat();
 });
 

@@ -7,7 +7,8 @@ import { hashDirectory, buildFingerprint } from '../scripts/artifact-hashes.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'test-results');
-const screenshots = path.join(output, 'context-0.9.1');
+const { version } = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
+const screenshots = path.join(output, 'context-' + version);
 await fs.mkdir(screenshots, { recursive: true });
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
   for (const directory of ['.cache/ms-playwright', '.browsers']) {
@@ -32,7 +33,7 @@ function assertTestDirectory(directory) {
 const testedFiles = await hashDirectory(path.join(root, 'dist'));
 const productionManifest = await fs.readFile(path.join(root, 'dist/manifest.json'), 'utf8');
 const manifest = JSON.parse(productionManifest);
-assert.equal(manifest.version, '0.9.1', 'Build M2 0.9.1 before running context e2e');
+assert.equal(manifest.version, version, 'Build the current extension before running context e2e');
 assert.ok(manifest.permissions.includes('contextMenus'));
 const report = {
   mockOnly: true, realModelVerified: false, nativeMenuSelectionVerified: false,
@@ -51,12 +52,12 @@ const report = {
     'Toolbar cases use real mouse/keyboard selection and real button clicks in a production worker with no test entry. Programmatic selection and DOM.click are separate negative controls.',
     'Only supplemental native-menu cases instrument a temporary worker copy to invoke its registered onClicked listener after a trusted contextmenu event. Native menu item selection remains manual.',
     'All model responses are deterministic local mock SSE. These checks verify data flow, cancellation, prompts and UI partitions; actual model answer quality remains unverified.',
-    'Existing 0.3.0 reports and screenshots are preserved; this report and context-0.9.1 screenshots are separate.'
+    'Reports and screenshots are stored by extension version.'
   ]
 };
 const fixtures = await startFixtures({ port: Number(process.env.FIXTURE_PORT || 4327) });
 report.fixtureOrigin = fixtures.origin;
-const profile = await fs.mkdtemp(path.join(output, 'context-0.9.1-profile-'));
+const profile = await fs.mkdtemp(path.join(output, 'context-' + version + '-profile-'));
 assertTestDirectory(profile);
 const testExtension = path.join(profile, 'test-extension');
 assertTestDirectory(testExtension);
@@ -203,7 +204,7 @@ try {
   report.browser = context.browser().version();
   options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'initial settings unavailable');
   source = await context.newPage(); await source.goto(fixtures.origin + '/context-tech');
-  await check('0.9.1 initial optional permission boundary', async () => {
+  await check('initial optional permission boundary', async () => {
     assert.deepEqual((await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).permissions, []);
     await realSelect(source, '#term-a'); await sleep(200); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
   });
@@ -222,19 +223,19 @@ try {
   await settings('normal', fakeKey); source = await context.newPage(); await gotoContext();
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixtures.origin }); report.extensionId = extensionId;
 
-  await check('0.9.1 programmatic selection alone creates no toolbar or API call', async () => {
+  await check('programmatic selection alone creates no toolbar or API call', async () => {
     fixtures.reset(); await source.locator('#term-a').selectText(); await sleep(250); assert.equal(await selected(source), 'coherence');
     assert.equal(await toolbar(source).count(), 0); assert.equal(await host(source).count(), 0); assert.equal(count(), 0);
     await source.evaluate(() => getSelection()?.removeAllRanges());
   });
-  await check('0.9.1 trusted selection shows compact toolbar with zero API; DOM.click has no effect', async () => {
+  await check('trusted selection shows compact toolbar with zero API; DOM.click has no effect', async () => {
     await gotoContext(true); fixtures.reset(); assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
     for (const name of ['translate', 'explain', 'close']) await tool(source, name).evaluate(node => node.click());
     await sleep(200); assert.equal(count(), 0); assert.equal(await host(source).count(), 0); assert.equal(await toolbar(source).isVisible(), true);
     assert.equal((await selected(source)).trim(), 'resilience'); report.testHarness.toolbarSyntheticClickRejected = true;
     await inViewport(toolbar(source).locator('.toolbar')); await toolbar(source).locator('.toolbar').screenshot({ path: path.join(screenshots, 'toolbar-desktop.png') });
   });
-  await check('0.9.1 translate click makes exactly one request and preserves the real selection', async () => {
+  await check('translate click makes exactly one request and preserves the real selection', async () => {
     await clickToolbar(source, 'translate'); assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(count(), 1);
     assert.equal(latest().contextMode, 'translate'); assert.equal(input().selection.trim(), 'resilience'); assert.equal((await selected(source)).trim(), 'resilience');
     assert.match(prompt(), /完整译|完整翻译/); assert.match(input().paragraphContext, /FOREIGN_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /FOREIGN_NEAR_AFTER_SENTINEL/);
@@ -242,7 +243,7 @@ try {
     assert.match(await core(source).innerText(), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(await details(source).isVisible(), false); assert.equal(await action(source, 'expand').innerText(), '双语例句');
     await panel(source).screenshot({ path: path.join(screenshots, 'translate-core-desktop.png') });
   });
-  await check('0.9.1 short-English expansion has 1–2 actual English/Chinese pairs in a separate section', async () => {
+  await check('short-English expansion has 1–2 actual English/Chinese pairs in a separate section', async () => {
     const before = await core(source).innerText(); await expand(source); assert.equal(count(), 2); assert.equal(latest().contextAnswerKind, 'details');
     assert.match(prompt(), /1.?2|一.?两|1—2/); assert.match(prompt(), /英文|英语/); assert.match(prompt(), /中文/); assert.match(input().existingCoreAnswer, /CONTEXT_TRANSLATION_OUTPUT/);
     assert.equal(await core(source).innerText(), before); const examples = await details(source).innerText();
@@ -250,7 +251,7 @@ try {
     assert.match(examples, /The system needs resilience when a server fails\.\s*服务器发生故障时，系统需要具备恢复能力。/);
     assert.equal((examples.match(/^\d\./gm) || []).length, 2); await panel(source).screenshot({ path: path.join(screenshots, 'translate-examples-desktop.png') });
   });
-  await check('0.9.1 technical explanation retains nearby context and explicit usage example partition', async () => {
+  await check('technical explanation retains nearby context and explicit usage example partition', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1); assert.equal(latest().contextMode, 'explain');
     assert.match(input().paragraphContext, /CONTEXT_A_NEAR_SENTINEL/); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_AFTER_SENTINEL/);
     assert.equal(await action(source, 'expand').innerText(), '用法示例'); const before = await core(source).innerText(); await expand(source); assert.equal(count(), 2);
@@ -258,64 +259,64 @@ try {
     await panel(source).screenshot({ path: path.join(screenshots, 'explain-usage-desktop.png') });
     await action(source, 'copy').click(); const copied = (await source.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'); assert.ok(copied.includes(before)); assert.match(copied, /最小代码/);
   });
-  await check('0.9.1 result controls ignore synthetic page clicks', async () => {
+  await check('result controls ignore synthetic page clicks', async () => {
     const before = count(), oldId = await panel(source).getAttribute('data-request-id');
     for (const name of ['retry', 'expand', 'stop', 'close']) await action(source, name).evaluate(node => node.click());
     await sleep(180); assert.equal(count(), before); assert.equal(await panel(source).getAttribute('data-request-id'), oldId); assert.equal(await status(source).getAttribute('data-phase'), 'done');
   });
-  await check('0.9.1 long paragraph translation sends the complete selection and hides unrelated example action', async () => {
+  await check('long paragraph translation sends the complete selection and hides unrelated example action', async () => {
     await gotoContext(true); fixtures.reset(); const text = await selectToolbar(source, '#ctx-long-foreign', { paragraph: true }); assert.ok(text.length > 240);
     await clickToolbar(source, 'translate'); await completed(source); assert.equal(count(), 1); assert.equal(input().selection.trim(), text.trim()); assert.match(input().selection, /LONG_ENGLISH_CONTEXT_SENTINEL/);
     assert.equal(await action(source, 'expand').isVisible(), false); assert.equal(await details(source).isVisible(), false); await panel(source).screenshot({ path: path.join(screenshots, 'translate-long-no-examples.png') });
   });
-  await check('0.9.1 keyboard selection completion shows toolbar without a request', async () => {
+  await check('keyboard selection completion shows toolbar without a request', async () => {
     await gotoContext(); fixtures.reset(); const text = await selectToolbar(source, '#term-a', { keyboard: true }); assert.match(text, /coherence/); assert.equal(count(), 0);
     await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' }); assert.equal(count(), 0);
   });
-  await check('0.9.1 close, new selection, blank click and page scroll clear transient UI without requests', async () => {
+  await check('close, new selection, blank click and page scroll clear transient UI without requests', async () => {
     await gotoContext(); fixtures.reset(); await selectToolbar(source, '#term-a'); await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' });
     await selectToolbar(source, '#term-a'); await selectToolbar(source, '#term-b'); assert.equal((await selected(source)).trim(), 'microtasks');
     await source.locator('#ctx-empty').click(); await until(async () => await toolbar(source).count() === 0 && await host(source).count() === 0, 'blank click did not dismiss UI');
     await selectToolbar(source, '#term-a'); await source.evaluate(() => getSelection()?.removeAllRanges()); await until(async () => await toolbar(source).count() === 0, 'disappeared selection left toolbar visible');
     await selectToolbar(source, '#term-a'); await source.mouse.wheel(0, 250); await until(async () => await toolbar(source).count() === 0, 'page scroll left toolbar visible'); assert.equal(count(), 0);
   });
-  await check('0.9.1 input, password, editable and form selections never show a toolbar', async () => {
+  await check('input, password, editable and form selections never show a toolbar', async () => {
     fixtures.reset();
     for (const selector of ['#ctx-input', '#ctx-password', '#term-editor', '#term-form']) {
       await gotoContext(); await realSelect(source, selector, { allowEmpty: true }); await sleep(180);
       assert.equal(await toolbar(source).count(), 0, selector); assert.equal(await host(source).count(), 0, selector); assert.equal(count(), 0, selector);
     }
   });
-  await check('0.9.1 selecting the answer itself never opens another toolbar or pays again', async () => {
+  await check('selecting the answer itself never opens another toolbar or pays again', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await completed(source);
     const box = await core(source).boundingBox(); await source.mouse.dblclick(box.x + 35, box.y + 12); await sleep(180); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
     await closeAnswer(source);
   });
-  await check('0.9.1 dragging a link never triggers a selection toolbar or model request', async () => {
+  await check('dragging a link never triggers a selection toolbar or model request', async () => {
     await gotoContext(); fixtures.reset(); const link = source.locator('#ctx-drag-link'); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox();
     await source.mouse.move(box.x + 15, box.y + box.height / 2); await source.mouse.down(); await source.mouse.move(box.x + 110, box.y + box.height / 2 + 22, { steps: 14 }); await source.mouse.up();
     await sleep(300); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
   });
-  await check('0.9.1 consecutive A/B selections cancel delayed A and isolate B output', async () => {
+  await check('consecutive A/B selections cancel delayed A and isolate B output', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'slow A request missing'); const old = latest();
     await selectAndInvoke(source, '#term-b'); assert.match(await completed(source), /CONTEXT_B_OUTPUT/); assert.doesNotMatch(await answer(source).innerText(), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2); await until(() => old.aborted, 'A was not cancelled');
     assert.equal(await host(source).count(), 1);
   });
-  await check('0.9.1 stop retains partial output and aborts without later appends', async () => {
+  await check('stop retains partial output and aborts without later appends', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(async () => (await answer(source).innerText()).includes('CONTEXT_A_OUTPUT'), 'slow stream did not start');
     const request = latest(); await action(source, 'stop').click(); const stopped = await answer(source).innerText(); await sleep(650);
     assert.equal(await status(source).getAttribute('data-phase'), 'cancelled'); assert.equal(await answer(source).innerText(), stopped); assert.equal(count(), 1); await until(() => request.aborted, 'stopped connection did not abort');
   });
-  await check('0.9.1 explicit retry after stop creates one replacement ID and request', async () => {
+  await check('explicit retry after stop creates one replacement ID and request', async () => {
     const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'retry did not replace ID');
     assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2);
   });
-  await check('0.9.1 API error never automatically retries; explicit retry works after config change', async () => {
+  await check('API error never automatically retries; explicit retry works after config change', async () => {
     await gotoContext(); await settings('401'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(async () => await status(source).getAttribute('data-phase') === 'error', '401 error missing');
     assert.match(await status(source).innerText(), /401|Key/); assert.equal(count(), 1); await sleep(250); assert.equal(count(), 1);
     await settings('normal'); const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'error retry missing'); await completed(source); assert.equal(count(), 2);
   });
-  await check('0.9.1 narrow toolbar and result remain inside a 390px viewport', async () => {
+  await check('narrow toolbar and result remain inside a 390px viewport', async () => {
     try {
       await gotoContext(true); await source.setViewportSize({ width: 390, height: 844 }); fixtures.reset();
       // The fixture contains deliberately long form fields and sentinel words.
@@ -337,45 +338,45 @@ try {
     await source.mouse.move(3, 3); await until(async () => !(await source.locator('local-reader-preview .scrim').evaluate(node => node.classList.contains('active'))), 'M1 blur did not clear');
     return { visibleBeforeMouseup: true, extraWindows: 0, modelRequests: 0 };
   });
-  await check('0.9.1 actual preview iframe toolbar explains its own technical document', async () => {
+  await check('actual preview iframe toolbar explains its own technical document', async () => {
     await source.goto(fixtures.origin + '/context-index'); await sleep(180); fixtures.reset(); const frame = await dragPreview('context-tech', '/context-tech'); await selectAndInvoke(frame, '#term-a');
     assert.match(await completed(frame), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1); assert.equal(await host(source).count(), 0); assert.equal(input().url, fixtures.origin + '/context-tech'); assert.match(input().paragraphContext, /CONTEXT_A_NEAR_SENTINEL/);
     await source.screenshot({ path: path.join(screenshots, 'explain-preview-frame.png') });
   });
-  await check('0.9.1 actual preview iframe toolbar translates and expands bilingual examples', async () => {
+  await check('actual preview iframe toolbar translates and expands bilingual examples', async () => {
     fixtures.reset(); const frame = await dragPreview('context-foreign', '/context-foreign'); await selectAndInvoke(frame, '#term-foreign', 'translate'); await completed(frame);
     assert.equal(input().url, fixtures.origin + '/context-foreign'); assert.match(input().title, /Foreign reading/); assert.match(input().paragraphContext, /FOREIGN_CONTEXT_SENTINEL/); assert.equal(count(), 1);
     await expand(frame); assert.equal(count(), 2); assert.match(await details(frame).innerText(), /The wetland showed resilience/); await source.screenshot({ path: path.join(screenshots, 'translate-preview-frame.png') });
   });
-  await check('0.9.1 closing parent preview releases old-frame Port and aborts its request', async () => {
+  await check('closing parent preview releases old-frame Port and aborts its request', async () => {
     await settings('slow'); fixtures.reset(); const frame = await dragPreview('context-tech', '/context-tech'); await selectAndInvoke(frame, '#term-a'); await until(() => count() === 1, 'iframe request missing'); const old = latest();
     await source.locator('local-reader-preview [data-reader-action="close"]').click(); await until(() => old.aborted, 'frame detach did not abort'); assert.equal(count(), 1); assert.equal(await source.locator('local-reader-preview').count(), 0);
   });
-  await check('0.9.1 navigation cancels old document without contaminating a new answer', async () => {
+  await check('navigation cancels old document without contaminating a new answer', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'old-document request missing'); const old = latest();
     await gotoContext(true); await until(() => old.aborted, 'navigation did not abort'); assert.equal(await host(source).count(), 0); await settings('normal'); await selectAndInvoke(source, '#term-foreign', 'translate');
     assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.doesNotMatch(await answer(source).innerText(), /CONTEXT_A_OUTPUT/); assert.equal(count(), 2);
   });
-  await check('0.9.1 missing Key makes zero paid requests after a real toolbar click', async () => {
+  await check('missing Key makes zero paid requests after a real toolbar click', async () => {
     await options.locator('#clear-key').click(); await until(async () => !(await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).hasKey, 'Key clear incomplete'); await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a');
     await until(async () => await status(source).getAttribute('data-phase') === 'error', 'missing-Key error absent'); assert.match(await status(source).innerText(), /设置|Key|模型/); assert.equal(count(), 0); await settings('normal', fakeKey);
   });
-  await check('0.9.1 configuration barrier cancels running request until an explicit retry', async () => {
+  await check('configuration barrier cancels running request until an explicit retry', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before config missing'); const old = latest();
     await settings('normal'); await until(() => old.aborted, 'config did not abort'); await until(async () => await status(source).getAttribute('data-phase') === 'cancelled', 'cancelled config state missing'); await sleep(180); assert.equal(count(), 1);
     const oldId = await panel(source).getAttribute('data-request-id'); await action(source, 'retry').click(); await until(async () => await panel(source).getAttribute('data-request-id') !== oldId, 'config retry missing'); await completed(source); assert.equal(count(), 2);
   });
-  await check('0.9.1 clearing Key aborts a running request and never resubmits it', async () => {
+  await check('clearing Key aborts a running request and never resubmits it', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before Key clear missing'); const old = latest();
     await options.locator('#clear-key').click(); await until(() => old.aborted, 'Key clear did not abort'); await until(async () => await status(source).getAttribute('data-phase') === 'cancelled', 'Key cancelled state absent'); await sleep(200); assert.equal(count(), 1); await settings('normal', fakeKey);
   });
-  await check('0.9.1 permission revocation aborts running selection and prevents a new paid call', async () => {
+  await check('permission revocation aborts running selection and prevents a new paid call', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before revoke missing'); const old = latest();
     await options.evaluate(() => chrome.permissions.remove({ origins: ['http://127.0.0.1/*'] })); await until(() => old.aborted, 'permission revoke did not abort'); await until(async () => await host(source).count() === 0, 'revoked UI remained');
     await realSelect(source, '#term-b'); await sleep(250); if (await toolbar(source).count()) await tool(source, 'translate').click(); await sleep(250); assert.equal(count(), 1);
     return 'Selection completion after revocation cannot start another model request.';
   });
-  await check('0.9.1 production toolbar path leaves storage/network and build boundaries intact', async () => {
+  await check('production toolbar path leaves storage/network and build boundaries intact', async () => {
     const persisted = await options.evaluate(() => Promise.all([chrome.storage.local.get(null), chrome.storage.sync.get(null)])); assert.ok(!JSON.stringify(persisted).includes(fakeKey)); assert.ok(!JSON.stringify(persisted).includes('CONTEXT_A_NEAR_SENTINEL')); assert.deepEqual(persisted[1], {});
     assert.ok(report.network.every(request => ['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname))); assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined');
     assert.deepEqual(await hashDirectory(testExtension), testedFiles); assert.deepEqual(await hashDirectory(path.join(root, 'dist')), testedFiles);
@@ -399,20 +400,20 @@ try {
   await fs.writeFile(manifestPath, productionManifest); await fs.writeFile(backgroundPath, productionBackground);
   assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true; report.testHarness.nativeMenuCallbackInstrumented = true;
   options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'native supplement settings unavailable'); await settings('normal', fakeKey); source = await context.newPage();
-  await check('0.9.1 native-menu supplement uses a trusted contextmenu snapshot', async () => {
+  await check('native-menu supplement uses a trusted contextmenu snapshot', async () => {
     await gotoContext(); fixtures.reset(); await nativeInvoke(source, '#term-a', 'explain'); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1);
     assert.equal(input().selection.trim(), 'coherence'); report.testHarness.trustedNativeContextMenuEvent = true; return { nativeMenuSelectionVerified: false, listenerInvokedByHarness: true };
   }, 'instrumented-native-menu-supplement');
-  await check('0.9.1 native-menu snapshot survives selection collapse before the explicit menu callback', async () => {
+  await check('native-menu snapshot survives selection collapse before the explicit menu callback', async () => {
     await gotoContext(); fixtures.reset(); await nativeInvoke(source, '#term-a', 'explain', { clearAfterMenu: true }); assert.match(await completed(source), /CONTEXT_A_OUTPUT/); assert.equal(count(), 1);
     assert.equal(await selected(source), ''); assert.equal(input().selection.trim(), 'coherence');
     return { nativeMenuSelectionVerified: false, trustedContextMenuZeroRequests: true, callbackRequests: 1, selectionCollapsedAfterCapture: true };
   }, 'instrumented-native-menu-supplement');
-  await check('0.9.1 native-menu supplement rejects empty selection without reusing previous text', async () => {
+  await check('native-menu supplement rejects empty selection without reusing previous text', async () => {
     await gotoContext(); fixtures.reset(); await source.locator('#ctx-empty').scrollIntoViewIfNeeded(); await source.evaluate(() => getSelection()?.removeAllRanges());
     await nativeInvoke(source, undefined, 'explain', { textOverride: '' }); await until(async () => await status(source).getAttribute('data-phase') === 'error', 'empty native error missing'); assert.equal(count(), 0);
   }, 'instrumented-native-menu-supplement');
-  await check('0.9.1 native harness restores exact temporary and production bytes', async () => {
+  await check('native harness restores exact temporary and production bytes', async () => {
     assert.deepEqual(await hashDirectory(testExtension), testedFiles); assert.deepEqual(await hashDirectory(path.join(root, 'dist')), testedFiles);
     return { nativeMenuSelectionVerified: false, temporaryCopyRestoredByteIdentical: true };
   }, 'instrumented-native-menu-supplement');
@@ -433,8 +434,8 @@ finally {
     selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting the answer itself', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
     m1DragSmoke: passed('M1 drag-hover smoke')
   };
-  await fs.writeFile(path.join(output, 'context-e2e-report-0.9.1.json'), JSON.stringify(report, null, 2) + '\n');
+  await fs.writeFile(path.join(output, 'context-e2e-report-' + version + '.json'), JSON.stringify(report, null, 2) + '\n');
   for (const temporaryProfile of [nativeProfile, profile].filter(Boolean)) { assertTestDirectory(temporaryProfile); await fs.rm(temporaryProfile, { recursive: true, force: true }); }
-  process.stdout.write(`Mock context 0.9.1 e2e: ${report.passed} passed, ${report.failed} failed. Native menu item selection remains manual.\n`);
+  process.stdout.write(`Mock context ${version} e2e: ${report.passed} passed, ${report.failed} failed. Native menu item selection remains manual.\n`);
   if (fatal || report.failed) process.exitCode = 1;
 }

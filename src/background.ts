@@ -36,8 +36,15 @@ void initializeContextMenus({
 }).catch(() => { /* The existing preview remains usable if menu registration fails. */ });
 initializeResearch({ configurationReady: () => settingsQueue, beforeRequest: () => { cancelContextTasks('已开始跨页研究。'); cancel('已开始跨页研究。'); testController?.abort(); } });
 void initializeChat({ configurationReady: () => settingsQueue, beforeRequest: () => { testController?.abort(); } });
-initializeChatConnection({ onConfigChange: () => { clearSiwcAccessToken(); cancelChat('对话连接已变化，请重新发送。'); } });
-initializeSiwc({ onConfigChange: () => { cancelChat('ChatGPT 授权状态已变化，请重新发送。'); } });
+initializeChatConnection({ onConfigChange: () => {
+  clearSiwcAccessToken();
+  cancelChat('对话连接已变化，请重新发送。');
+  cancelContextTasks('模型连接已变化，当前查阅已停止。');
+} });
+initializeSiwc({ onConfigChange: () => {
+  cancelChat('ChatGPT 授权状态已变化，请重新发送。');
+  cancelContextTasks('ChatGPT 授权状态已变化，当前查阅已停止。');
+} });
 
 const ready = (async () => {
   await secureStorage;

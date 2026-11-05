@@ -3,9 +3,10 @@ import type { CompletionMessage } from './model';
 import type { SearchUpdate } from './chat-shared';
 import { getChatConnectionView, saveChatConnectionConfig } from './chat-connection';
 import { trustedPage } from './trusted-page';
-import { SIWC_API_ORIGIN, SIWC_HOST, type SiwcDiagnostic, type SiwcStatus, type SiwcView } from './siwc-shared';
+import { SIWC_API_ORIGIN, type SiwcDiagnostic, type SiwcStatus, type SiwcView } from './siwc-shared';
 import { parseSiwcModels, record, SiwcFailure, SiwcStream, siwcHttpFailure, siwcRequestBody, SIWC_ERRORS } from './siwc-protocol';
 import { sanitizeChatDetails } from './chat-details';
+import { siwcAuth } from './siwc-auth';
 
 const empty = (): SiwcStatus => ({ state: 'unchecked', loggedIn: false, planAuthorized: false, models: [], generation: 'unchecked' });
 let status = empty();
@@ -13,66 +14,29 @@ let initialized = false;
 let revision = 0;
 let onChange = () => {};
 let access: { accessToken: string; expiresAt: number; accountId: string } | undefined;
-let accessPending: Promise<typeof access> | undefined;
-let accessController: AbortController | undefined;
-let login: { controller: AbortController; port?: chrome.runtime.Port } | undefined;
+let accessController = new AbortController();
+let login: { controller: AbortController } | undefined;
 let checking: Promise<SiwcView> | undefined;
 
 const safeLabel = (value: unknown, max = 200): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
-function nativeError(code: unknown): SiwcFailure {
-  if (['signedOut', 'signed_out', 'reauthRequired', 'reauth_required', 'invalid_grant'].includes(String(code))) return new SiwcFailure('signedOut');
-  if (['planDenied', 'plan_denied', 'plan_not_authorized', 'planNotAuthorized'].includes(String(code))) return new SiwcFailure('planDenied');
-  if (code === 'loginTimeout') return new SiwcFailure('timeout');
-  if (code === 'accessDenied') return new SiwcFailure('authDenied');
-  if (['identityValidationFailed', 'accountMismatch', 'clientMismatch'].includes(String(code))) return new SiwcFailure('identity');
-  return new SiwcFailure('helper');
-}
-
-/** Each call owns a short-lived host process. No credential is persisted here. */
-function nativeCall(command: string, signal?: AbortSignal, bound?: (port: chrome.runtime.Port) => void, payload: { newAccount?: boolean } = {}): Promise<unknown> {
-  signal?.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    let port: chrome.runtime.Port | undefined;
-    let finished = false;
-    const id = crypto.randomUUID();
-    const timer = setTimeout(() => finish(new SiwcFailure('timeout')), command === 'login' ? 310_000 : command === 'status' ? 40_000 : 90_000);
-    const abort = () => finish(new DOMException('Aborted', 'AbortError'));
-    const finish = (error?: unknown, result?: unknown) => {
-      if (finished) return; finished = true;
-      clearTimeout(timer); signal?.removeEventListener('abort', abort);
-      try { port?.disconnect(); } catch { /* Chrome may have closed the host. */ }
-      error ? reject(error) : resolve(result);
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-    try {
-      port = chrome.runtime.connectNative(SIWC_HOST); bound?.(port);
-      port.onMessage.addListener((value: unknown) => {
-        if (!record(value) || value.id !== id) return;
-        if (value.ok === true && record(value.result)) finish(undefined, value.result);
-        else finish(nativeError(record(value.error) ? value.error.code : undefined));
-      });
-      port.onDisconnect.addListener(() => { void chrome.runtime.lastError; finish(new SiwcFailure('helperMissing')); });
-      port.postMessage({ ...payload, id, command });
-    } catch { finish(new SiwcFailure('helperMissing')); }
-  });
-}
-function helperStatus(value: unknown): SiwcStatus {
-  if (!record(value) || !['signedOut', 'ready', 'planDenied', 'reauthRequired'].includes(String(value.state)) || !safeLabel(value.version, 40)) throw new SiwcFailure('helper');
+function authStatus(value: unknown): SiwcStatus {
+  if (!record(value) || !['signedOut', 'ready', 'planDenied', 'reauthRequired'].includes(String(value.state))) throw new SiwcFailure('auth');
   const account = record(value.account) ? value.account : undefined;
-  if (account && (!safeLabel(account.id) || !safeLabel(account.label) || typeof account.planAuthorized !== 'boolean')) throw new SiwcFailure('helper');
+  if (account && (!safeLabel(account.id) || !safeLabel(account.label) || typeof account.planAuthorized !== 'boolean')) throw new SiwcFailure('auth');
   const loggedIn = !!account && (value.state === 'ready' || value.state === 'planDenied');
-  if (value.state === 'ready' && (!loggedIn || account?.planAuthorized !== true)) throw new SiwcFailure('helper');
-  return { state: value.state as SiwcStatus['state'], loggedIn, planAuthorized: loggedIn && account?.planAuthorized === true, helperVersion: value.version,
+  if (value.state === 'ready' && (!loggedIn || account?.planAuthorized !== true)) throw new SiwcFailure('auth');
+  return { state: value.state as SiwcStatus['state'], loggedIn, planAuthorized: loggedIn && account?.planAuthorized === true,
     ...(account ? { accountId: account.id as string, accountLabel: account.label as string } : {}), loginPending: value.loginPending === true,
     models: [], generation: 'unchecked', ...(typeof value.remoteRevocationConfirmed === 'boolean' ? { remoteRevoked: value.remoteRevocationConfirmed } : {}) };
 }
-export function clearSiwcAccessToken(): void {
-  ++revision; access = undefined; accessController?.abort(); accessController = undefined; accessPending = undefined;
+export function clearSiwcAccessToken(cancelPending = true): void {
+  ++revision; access = undefined; accessController.abort(); accessController = new AbortController();
+  if (cancelPending) void siwcAuth.call('cancelLogin').catch(() => {});
   if (login) { const previous = login; login = undefined; previous.controller.abort(); status = { ...status, loginPending: false }; }
 }
 function failureState(error: unknown): void {
   const known = error instanceof SiwcFailure ? error : new SiwcFailure('network');
-  if (known.code === 'signedOut' || known.code === 'planDenied' || known.code === 'helperMissing') {
+  if (known.code === 'signedOut' || known.code === 'planDenied') {
     access = undefined;
     status = { ...empty(), state: known.code === 'signedOut' ? 'reauthRequired' : known.code, error: known.message };
   } else status = { ...status, state: known.code === 'permission' ? 'permissionRequired' : 'error', error: known.message };
@@ -86,25 +50,14 @@ async function token(signal?: AbortSignal): Promise<NonNullable<typeof access>> 
   if (access && access.accountId === status.accountId && access.expiresAt > Date.now() + 60_000) return access;
   const before = revision;
   const accountId = status.accountId;
-  if (!accessPending) {
-    const controller = new AbortController(); accessController = controller;
-    const pending = nativeCall('getAccessToken', controller.signal).then(value => {
-      if (!record(value) || typeof value.accessToken !== 'string' || !/^[\x21-\x7e]{16,32000}$/.test(value.accessToken) || typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now() + 5_000 || value.accountId !== accountId) throw new SiwcFailure('helper');
-      if (before !== revision) throw new DOMException('Aborted', 'AbortError');
-      return access = { accessToken: value.accessToken, expiresAt: value.expiresAt, accountId };
-    });
-    accessPending = pending;
-    void pending.finally(() => { if (accessPending === pending) { accessPending = undefined; accessController = undefined; } }).catch(() => {});
-  }
-  const owner = accessController;
-  const abort = () => owner?.abort();
-  signal?.addEventListener('abort', abort, { once: true });
-  try {
-    const value = await accessPending;
-    signal?.throwIfAborted();
-    if (before !== revision || !value) throw new DOMException('Aborted', 'AbortError');
-    return value;
-  } finally { signal?.removeEventListener('abort', abort); }
+  // The auth store serializes rotation. Each task supplies its own cancellation
+  // signal so stopping a lookup cannot cancel a chat waiting for credentials.
+  const combined = signal ? AbortSignal.any([signal, accessController.signal]) : accessController.signal;
+  const value = await siwcAuth.call('getAccessToken', combined);
+  combined.throwIfAborted();
+  if (before !== revision) throw new DOMException('Aborted', 'AbortError');
+  if (!record(value) || typeof value.accessToken !== 'string' || !/^[\x21-\x7e]{16,32000}$/.test(value.accessToken) || typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now() + 5_000 || value.accountId !== accountId) throw new SiwcFailure('auth');
+  return access = { accessToken: value.accessToken, expiresAt: value.expiresAt, accountId };
 }
 async function models(): Promise<SiwcStatus['models']> {
   await permissions();
@@ -117,14 +70,23 @@ async function models(): Promise<SiwcStatus['models']> {
   try { value = JSON.parse(text); } catch { throw new SiwcFailure('format'); }
   return parseSiwcModels(value);
 }
-export async function getSiwcView(): Promise<SiwcView> { return { config: (await getChatConnectionView()).config, status: structuredClone(status) }; }
+export async function getSiwcView(): Promise<SiwcView> {
+  // Reading saved login state is local-only. This also exposes a recovered
+  // pending transaction after MV3 restart without starting another sign-in.
+  if (status.state === 'unchecked' && !login) {
+    const before = revision;
+    try { const saved = authStatus(await siwcAuth.call('status')); if (before === revision) status = saved; }
+    catch (error) { if (before === revision) failureState(error); }
+  }
+  return { config: (await getChatConnectionView()).config, status: structuredClone(status) };
+}
 export async function refreshSiwc(notify = true): Promise<SiwcView> {
   if (checking) return checking;
-  clearSiwcAccessToken(); if (notify) onChange();
+  clearSiwcAccessToken(false); if (notify) onChange();
   const before = revision;
   checking = (async () => {
     try {
-      const next = helperStatus(await nativeCall('status'));
+      const next = authStatus(await siwcAuth.call('status'));
       if (before !== revision) return getSiwcView();
       status = next;
       if (next.planAuthorized) {
@@ -139,17 +101,17 @@ export async function refreshSiwc(notify = true): Promise<SiwcView> {
 export async function ensureSiwcReady(): Promise<SiwcView> {
   // Passive panel recovery must not replace or cancel an in-progress login.
   if (login || status.loginPending) return getSiwcView();
-  return checking ?? (status.state === 'unchecked' ? refreshSiwc(false) : getSiwcView());
+  return checking ?? (status.state === 'unchecked' || status.state === 'ready' && !status.models.length ? refreshSiwc(false) : getSiwcView());
 }
 async function loginSiwc(newAccount = false): Promise<SiwcView> {
-  if (login) throw new SiwcFailure('helper');
+  if (login) throw new SiwcFailure('auth');
   await permissions();
   clearSiwcAccessToken(); onChange();
   const before = revision;
-  const owner = { controller: new AbortController(), port: undefined as chrome.runtime.Port | undefined }; login = owner;
+  const owner = { controller: new AbortController() }; login = owner;
   status = { ...empty(), loginPending: true };
   try {
-    const next = helperStatus(await nativeCall('login', owner.controller.signal, port => { owner.port = port; }, newAccount ? { newAccount: true } : {}));
+    const next = authStatus(await siwcAuth.call('login', owner.controller.signal, { newAccount }));
     if (before === revision) {
       status = next;
       if (next.planAuthorized) {
@@ -165,17 +127,17 @@ async function loginSiwc(newAccount = false): Promise<SiwcView> {
 }
 function cancelLogin(): void {
   const active = login;
-  if (!active) return;
-  try { active.port?.postMessage({ id: crypto.randomUUID(), command: 'cancelLogin' }); } catch { /* Disconnect also cancels the owned authorization. */ }
+  if (!active) { void siwcAuth.call('cancelLogin').catch(() => {}); return; }
+  void siwcAuth.call('cancelLogin').catch(() => {});
   active.controller.abort(); clearSiwcAccessToken(); status = empty(); onChange();
 }
 async function logoutSiwc(): Promise<SiwcView> {
   cancelLogin(); clearSiwcAccessToken(); onChange();
   const before = revision;
   try {
-    const next = helperStatus(await nativeCall('logout'));
+    const next = authStatus(await siwcAuth.call('logout'));
     if (before === revision) status = next;
-  } catch (error) { if (before === revision) failureState(error); throw error instanceof SiwcFailure ? error : new SiwcFailure('helper'); }
+  } catch (error) { if (before === revision) failureState(error); throw error instanceof SiwcFailure ? error : new SiwcFailure('auth'); }
   return getSiwcView();
 }
 /** Read only a bounded error shape, never expose provider prose or raw bodies. */
@@ -200,11 +162,19 @@ async function errorShape(response: Response): Promise<unknown> {
   finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
 }
 
-export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void): Promise<string> {
+export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void, purpose: 'chat' | 'context' = 'chat'): Promise<string> {
   signal.throwIfAborted();
   const view = await ensureSiwcReady();
   signal.throwIfAborted();
-  if (view.config.provider !== 'chatgptOAuth' || view.status.state !== 'ready' || !view.status.models.some(item => item.id === view.config.model)) throw new SiwcFailure(view.status.planAuthorized ? 'model' : 'signedOut');
+  if (view.config.provider !== 'chatgptOAuth') throw new SiwcFailure('signedOut');
+  if (view.status.loginPending) throw new SiwcFailure('authBusy');
+  if (view.status.state === 'planDenied') throw new SiwcFailure('planDenied');
+  if (view.status.state === 'permissionRequired') throw new SiwcFailure('permission');
+  if (view.status.state !== 'ready') {
+    if (view.status.error) throw new Error(view.status.error);
+    throw new SiwcFailure('signedOut');
+  }
+  if (!view.status.models.some(item => item.id === view.config.model)) throw new SiwcFailure('model');
   await permissions();
   const before = revision;
   let diagnostic: SiwcDiagnostic = { stage: 'preflight' };
@@ -227,8 +197,8 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
     onText(text);
   }, onUpdate);
   try {
-    const body = siwcRequestBody(view.config.model, messages);
-    diagnostic.stage = 'helper';
+    const body = siwcRequestBody(view.config.model, messages, purpose === 'chat');
+    diagnostic.stage = 'credentials';
     const credential = await token(combined);
     combined.throwIfAborted();
     diagnostic.stage = 'headers';
@@ -263,13 +233,15 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
     }
     diagnostic.stage = 'completion';
     const result = stream.finish();
-    status = { ...status, generation: 'working' }; delete status.error; delete status.diagnostic;
+    if (purpose === 'chat') {
+      status = { ...status, generation: 'working' }; delete status.error; delete status.diagnostic;
+    }
     return result;
   } catch (error) {
     if (signal.aborted || before !== revision) throw new DOMException('Aborted', 'AbortError');
     const failure = timedOut ? new SiwcFailure('timeout') : error instanceof SiwcFailure ? error : new SiwcFailure('network');
-    if (failure.code === 'signedOut') failureState(failure);
-    status = { ...status, generation: 'blocked', error: failure.message, diagnostic: { ...diagnostic, reason: timedOut ? 'timeout' : failure.reason || 'unknown' } };
+    if (failure.code === 'signedOut' || failure.code === 'planDenied') failureState(failure);
+    if (purpose === 'chat') status = { ...status, generation: 'blocked', error: failure.message, diagnostic: { ...diagnostic, reason: timedOut ? 'timeout' : failure.reason || 'unknown' } };
     throw failure;
   } finally {
     clearTimeout(total); clearTimeout(idle);
@@ -286,6 +258,11 @@ function trusted(sender: chrome.runtime.MessageSender): boolean { return trusted
 export function initializeSiwc(options: { onConfigChange?: () => void } = {}): void {
   if (options.onConfigChange) onChange = options.onConfigChange;
   if (initialized) return; initialized = true;
+  siwcAuth.initialize(() => {
+    if (login) return;
+    clearSiwcAccessToken(); status = empty();
+    void refreshSiwc().then(() => onChange());
+  });
   chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
     if (!record(message) || typeof message.type !== 'string' || !message.type.startsWith('siwc:')) return;
     if (!trusted(sender)) { respond({ ok: false, error: '仅设置页和侧边栏可操作 ChatGPT 官方登录。' }); return; }
@@ -294,7 +271,7 @@ export function initializeSiwc(options: { onConfigChange?: () => void } = {}): v
         case 'siwc:get': return getSiwcView();
         case 'siwc:refresh': return refreshSiwc();
         case 'siwc:login': return loginSiwc(message.newAccount === true);
-        case 'siwc:cancel': cancelLogin(); return getSiwcView();
+        case 'siwc:cancel': cancelLogin(); await siwcAuth.call('cancelLogin'); return refreshSiwc();
         case 'siwc:logout': return logoutSiwc();
         case 'siwc:save': {
           const config = message.config;
@@ -302,10 +279,10 @@ export function initializeSiwc(options: { onConfigChange?: () => void } = {}): v
           await saveChatConnectionConfig({ provider: 'chatgptOAuth', model: config.model });
           return getSiwcView();
         }
-        default: throw new SiwcFailure('helper');
+        default: throw new SiwcFailure('auth');
       }
     };
-    void run().then(view => respond({ ok: true, view })).catch(error => respond({ ok: false, error: error instanceof SiwcFailure ? error.message : SIWC_ERRORS.helper }));
+    void run().then(view => respond({ ok: true, view })).catch(error => respond({ ok: false, error: error instanceof SiwcFailure ? error.message : SIWC_ERRORS.auth }));
     return true;
   });
 }

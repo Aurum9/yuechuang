@@ -140,6 +140,15 @@ test('menu reads and shows the exact clicked document, then sends only selected 
   assert.equal(calls[0].url, API + '/chat/completions');
 });
 
+test('signed-out ChatGPT selection reports the login requirement without spending the saved API Key', async () => {
+  local.webChatConfig = { provider: 'chatgptOAuth', model: 'gpt-example' };
+  click('product', 0, { menuItemId: CONTEXT_MENU_TRANSLATE });
+  const port = await terminal();
+  assert.equal(last(port).status, 'error');
+  assert.match(last(port).error!, /登录 ChatGPT/);
+  assert.equal(calls.length, 0);
+});
+
 test('no model request occurs without the answer Port, and fake/stale/wrong-frame ports are rejected', async () => {
   autoConnect = false; click(); await waitFor(() => showMessages().length === 1, 'show without port'); await settle();
   for (const source of [sender(42), sender(0, { id: 'other' }), sender(0, { documentId: 'stale-document' }), sender(0, { url: 'https://forged.test/' })]) {

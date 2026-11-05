@@ -53,7 +53,7 @@ const mockChrome = {
     create(value: { id: string }, done?: () => void) { done?.(); return value.id; }, remove(_id: string, done?: () => void) { done?.(); } },
   permissions: { onAdded: permissionsAdded, onRemoved: permissionsRemoved,
     async contains({ origins }: { origins: string[] }) { const allowed = origins.every(origin => granted.has(origin) || (origin.startsWith('https:') && granted.has('https://*/*'))); if (permissionGate) { const pause = permissionGate; permissionGate = undefined; pause.reached.resolve(); await pause.release.promise; } return allowed; }, async getAll() { return { origins: [...granted] }; } },
-  tabs: { onRemoved: tabsRemoved,
+  tabs: { onRemoved: tabsRemoved, onUpdated: new EventHub<[number, chrome.tabs.OnUpdatedInfo]>(),
     async get(tabId: number) { if (tabId !== 1) throw new Error('No tab'); return { id: 1, windowId: 5, url: SOURCE }; },
     async query() { return [{ id: 1, windowId: 5, url: SOURCE }]; }, async create(value: unknown) { return value; },
     async sendMessage(tabId: number, message: Message, options?: { documentId?: string }) {
@@ -65,7 +65,8 @@ const mockChrome = {
       return result;
     }
   },
-  webNavigation: { onCommitted: committed, onErrorOccurred: navigationError,
+  alarms: { onAlarm: new EventHub<[chrome.alarms.Alarm]>(), async clear() { return true; } },
+  webNavigation: { onBeforeNavigate: new EventHub<[chrome.webNavigation.WebNavigationBaseCallbackDetails]>(), onCommitted: committed, onErrorOccurred: navigationError,
     async getFrame({ tabId, frameId }: { tabId: number; frameId: number }) {
       if (tabId !== 1) return undefined;
       const snapshot = structuredClone(frames.get(frameId));
