@@ -2,6 +2,7 @@ import { CONTEXT_PORT, MAX_CONTEXT_PARAGRAPHS, MAX_CONTEXT_SELECTION, MAX_CONTEX
 import { createContextPanel } from './context-ui';
 import { createSelectionToolbar } from './selection-toolbar';
 import { consumeRuntimeLastError, isBackgroundSender, notifyBackground } from './content-runtime';
+import { chatPageQuote } from './chat-shared';
 
 const SNAPSHOT_LIFETIME = 60_000;
 const EXCLUDED = 'script,style,noscript,template,iframe,svg,canvas,form,input,textarea,select,button,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"],[role="searchbox"],[hidden],[aria-hidden="true"],[data-local-reader-root],.CodeMirror,.monaco-editor,.ace_editor,[data-slate-editor],[data-lexical-editor]';
@@ -104,14 +105,20 @@ export function bootContextReading(): void {
   }
   async function finishSelection(point?: { x: number; y: number }): Promise<void> {
     navigation();
-    if (toolbarHiddenForDocument || dragging || Date.now() < suppressUntil) return;
+    if (dragging || Date.now() < suppressUntil) return;
     const version = ++gestureVersion;
-    const result = captureContextSelection(document, Date.now(), point);
+    const capturedAt = Date.now();
+    const url = location.href;
+    const visible = readVisibleSelection(document);
     const identity = selectionIdentity(document);
-    if (!result.ok || !identity) { invalidateSelection(); return; }
+    if (!visible.ok || !identity) { invalidateSelection(); return; }
+    notifyBackground({ type: 'context:page-quote', text: chatPageQuote(visible.text), url });
+    if (toolbarHiddenForDocument) return;
     try { if (eligibilityPending) await eligibilityPending; }
     catch { return; }
-    if (!enabled || version !== gestureVersion || !sameSelection(identity, document) || location.href !== result.snapshot.url) return;
+    if (!enabled || version !== gestureVersion || !sameSelection(identity, document) || location.href !== url) return;
+    const result = captureContextSnapshot(document, visible, capturedAt, point);
+    if (!result.ok) { invalidateSelection(); return; }
     // No model or content upload occurs here. The nonce identifies exactly this
     // completed gesture; a later click authorizes the background to request it.
     const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), word => word.toString(16).padStart(8, '0')).join('');
@@ -147,6 +154,12 @@ export function bootContextReading(): void {
       if (type === 'context:close') dismissAll();
       else if (type === 'context:retry') { panel?.remove(); panel = undefined; void startSelection(mode); }
     } });
+  }
+  async function followUp(): Promise<string | undefined> {
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'context:follow-up', requestId: currentId }) as { ok?: boolean; error?: string };
+      return result?.ok ? undefined : result?.error || '无法打开侧栏追问，请重试。';
+    } catch { return '无法连接阅窗侧栏，请刷新页面后重试。'; }
   }
   document.addEventListener('pointerdown', event => {
     if (!event.isTrusted || panel?.contains(event) || isReaderEvent(event, 'selection-toolbar')) return;
@@ -225,7 +238,7 @@ export function bootContextReading(): void {
     removeToolbar(); clearLocal(); currentId = message.requestId; shownCaptureId = message.captureId;
     const version = generation;
     panelPin = message.pin;
-    panel = createContextPanel(message, menuRect, { command, savePin }, previousLayout ?? message.pin);
+    panel = createContextPanel(message, menuRect, { command, savePin, followUp }, previousLayout ?? message.pin);
     let next: chrome.runtime.Port;
     try { next = chrome.runtime.connect({ name: CONTEXT_PORT }); }
     catch { panel.interrupted(); return { ok: false, error: '扩展连接已失效，请刷新页面。' }; }
@@ -384,8 +397,8 @@ function sentenceContext(root: Element, range: Range, doc: Document): string | u
   return completeSentenceContext(raw, position.start ?? position.end!, position.end ?? position.start!);
 }
 
-/** Capture the actual selection at a trusted native context menu, without moving it. */
-export function captureContextSelection(doc: Document, capturedAt = Date.now(), point?: { x: number; y: number }): ContextCaptureResult {
+interface VisibleSelection { ok: true; range: Range; text: string; rects: DOMRect[]; lastSelectedText?: Node }
+function readVisibleSelection(doc: Document): VisibleSelection | Extract<ContextCaptureResult, { ok: false }> {
   const selection = doc.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return { ok: false, message: '请先选择文章中的文字，再打开右键菜单。' };
   const range = selection.getRangeAt(0);
@@ -413,6 +426,16 @@ export function captureContextSelection(doc: Document, capturedAt = Date.now(), 
   }
   const rects = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.x < (doc.defaultView?.innerWidth ?? Infinity) && rect.y < (doc.defaultView?.innerHeight ?? Infinity));
   if (!rects.length) return { ok: false, message: '选区当前不可见，请滚动到文字位置并重新选择。' };
+  return { ok: true, range, text, rects, lastSelectedText };
+}
+
+/** Capture the actual selection at a trusted native context menu, without moving it. */
+export function captureContextSelection(doc: Document, capturedAt = Date.now(), point?: { x: number; y: number }): ContextCaptureResult {
+  const visible = readVisibleSelection(doc);
+  return visible.ok ? captureContextSnapshot(doc, visible, capturedAt, point) : visible;
+}
+
+function captureContextSnapshot(doc: Document, { range, text, rects, lastSelectedText }: VisibleSelection, capturedAt: number, point?: { x: number; y: number }): ContextCaptureResult {
   const chosen = point ? rects.reduce((best, rect) => distance(rect, point) < distance(best, point) ? rect : best) : rects[0];
   const candidates = new Set<Element>();
   // A native triple-click may end at the next paragraph's offset zero. Use the

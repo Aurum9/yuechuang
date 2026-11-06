@@ -245,6 +245,25 @@ try {
     await gotoContext(true); fixtures.reset(); const text = await selectToolbar(source, '#ctx-long-foreign', { paragraph: true }); assert.ok(text.length > 240);
     await clickToolbar(source, 'translate'); await completed(source); assert.equal(count(), 1); assert.equal(input().selection.trim(), text.trim()); assert.match(input().selection, /LONG_ENGLISH_CONTEXT_SENTINEL/);
     assert.equal(await action(source, 'expand').isVisible(), false); assert.equal(await details(source).isVisible(), false); await panel(source).screenshot({ path: path.join(screenshots, 'translate-long-no-examples.png') });
+    const quote = panel(source).locator('.selection');
+    const result = panel(source).locator('.result');
+    const divider = panel(source).getByRole('separator', { name: '调整原文高度' });
+    const originalHeight = (await quote.boundingBox()).height;
+    const resultHeight = (await result.boundingBox()).height;
+    const panelHeight = (await panel(source).boundingBox()).height;
+    assert.equal((await quote.textContent()).trim(), text.trim());
+    const handle = await divider.boundingBox();
+    await source.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await source.mouse.down();
+    await source.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2 - 32, { steps: 6 });
+    await source.mouse.up();
+    assert.ok((await quote.boundingBox()).height < originalHeight);
+    assert.ok((await result.boundingBox()).height > resultHeight);
+    assert.equal((await panel(source).boundingBox()).height, panelHeight);
+    await divider.focus(); await source.keyboard.press('End');
+    assert.ok((await quote.boundingBox()).height > originalHeight);
+    assert.ok((await result.boundingBox()).height >= 36);
+    assert.equal(count(), 1);
   });
   await check('keyboard selection completion shows toolbar without a request', async () => {
     await gotoContext(); fixtures.reset(); const text = await selectToolbar(source, '#term-a', { keyboard: true }); assert.match(text, /coherence/); assert.equal(count(), 0);
@@ -364,6 +383,68 @@ try {
     await gotoContext(); fixtures.reset(); const link = source.locator('#ctx-drag-link'); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox();
     await source.mouse.move(box.x + 15, box.y + box.height / 2); await source.mouse.down(); await source.mouse.move(box.x + 110, box.y + box.height / 2 + 22, { steps: 14 }); await source.mouse.up();
     await sleep(300); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
+  });
+  await check('follow-up imports a reading turn and sends a new page quote with the next question only', async () => {
+    const shell = await context.newPage();
+    try {
+      await shell.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+      const composer = shell.locator('#chat-input');
+      await until(() => composer.isEnabled(), 'side panel chat did not connect');
+      await gotoContext(); fixtures.reset();
+      await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'initial page quote missing');
+      await action(source, 'follow-up').click();
+      const conversation = shell.locator('#chat-messages .chat-message');
+      await until(async () => await conversation.count() === 2, 'follow-up did not import the reading turn');
+      assert.match(await conversation.nth(0).innerText(), /coherence/);
+      assert.match(await conversation.nth(1).innerText(), /CONTEXT_A_OUTPUT/);
+      assert.equal(count(), 1, 'opening a follow-up must not call the model');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+
+      await selectToolbar(source, '#term-b');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'microtasks', 'new page quote missing');
+      assert.equal(count(), 1, 'selecting a quote must not call the model');
+      await composer.fill('这两段有什么关系？');
+      await shell.locator('#chat-send').click();
+      await until(() => count() === 2 && latest().completed, 'follow-up question did not reach the fixture');
+      const turns = latest().body.messages.slice(1);
+      assert.deepEqual(turns.map(turn => turn.role), ['user', 'assistant', 'user']);
+      assert.match(turns[0].content, /coherence/);
+      assert.match(turns[1].content, /CONTEXT_A_OUTPUT/);
+      assert.equal(turns[2].content, '网页选区引用（仅供参考）：\nmicrotasks\n\n我的问题：\n这两段有什么关系？');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+
+      await selectToolbar(source, '#term-b');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'visible' });
+      await composer.fill('保留这条问题草稿');
+      await options.bringToFront();
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      assert.equal(await composer.inputValue(), '保留这条问题草稿');
+
+      await realSelect(source, '#term-a');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'quote missing before same-document navigation');
+      await source.evaluate(() => history.pushState({}, '', '?changed=1'));
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      await realSelect(source, '#term-a');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'quote missing after same-document navigation');
+      await gotoContext(true);
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      assert.equal(await composer.inputValue(), '保留这条问题草稿');
+
+      await source.evaluate(() => {
+        const paragraph = document.createElement('p');
+        const word = document.createElement('span');
+        word.id = 'short-quote-in-long-paragraph'; word.textContent = 'excerpt';
+        paragraph.append(word, ' long'.repeat(2200));
+        document.querySelector('article').prepend(paragraph);
+      });
+      await realSelect(source, '#short-quote-in-long-paragraph');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'excerpt', 'short quote from an oversized paragraph missing');
+      assert.equal(await toolbar(source).count(), 0);
+      assert.equal(count(), 2, 'changing the quote must not send a new request');
+    } finally {
+      await shell.close();
+    }
   });
   await check('consecutive A/B selections cancel delayed A and isolate B output', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'slow A request missing'); const old = latest();

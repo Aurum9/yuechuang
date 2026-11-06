@@ -3,6 +3,7 @@ import { detailsEligibility, type ContextCommand, type ContextPanelPin, type Con
 export interface ContextPanelActions {
   command(type: ContextCommand['type']): void;
   savePin(pin: ContextPanelPin | null): Promise<boolean>;
+  followUp?(): Promise<string | undefined>;
 }
 export interface ContextPlacement { left: number; top: number; width: number; maxHeight: number }
 
@@ -24,6 +25,7 @@ export function placeContextPanel(rect: ContextRect, viewportWidth: number, view
 }
 
 export function createContextPanel(message: ContextShowMessage, fallbackRect: ContextRect, actions: ContextPanelActions, initialLayout = message.pin) {
+  const minResultHeight = 36;
   const mode = message.mode;
   let answer = message.coreText ?? '';
   let coreText = message.coreText ?? '';
@@ -36,8 +38,10 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
   let exampleKind = message.exampleKind ?? detailsEligibility(mode, message.snapshot?.text ?? message.selectionText ?? '');
   let phase: ContextState['status'] = message.error ? 'error' : 'reading';
   let saved = false, saving = false, savedId: string | undefined;
+  let openingChat = false;
   let pinned = !!message.pin;
   let layout = initialLayout;
+  let splitPanelHeight: number | undefined;
   const anchor = message.snapshot?.rect ?? fallbackRect;
   const host = document.createElement('local-reader-context');
   host.setAttribute('data-local-reader-root', 'context');
@@ -60,8 +64,16 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     .close { border: 0; background: transparent; font-size: 19px; color: #7b8ba0; }
     .pin { border-color: transparent; background: transparent; }
     .pin[aria-pressed="true"] { color: #3266b7; background: #e1ebfd; border-color: #a5bcdf; }
-    .body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 10px 13px 12px; user-select: text; }
-    .selection { color: #71839d; font-size: 11px; line-height: 1.55; padding: 0 0 8px; border-bottom: 1px solid #eef2f7; margin-bottom: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .body { flex: 1 1 auto; display: grid; grid-template-rows: minmax(0, var(--source-height, max-content)) auto minmax(${minResultHeight}px, 1fr); min-height: 0; padding-inline: 13px; user-select: text; }
+    .selection, .result { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+    .selection { color: #71839d; font-size: 11px; line-height: 1.55; max-height: var(--source-height, 62px); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .source-text { padding: 10px 0 2px; }
+    .splitter { position: relative; height: 14px; cursor: row-resize; touch-action: none; user-select: none; }
+    .splitter::before, .splitter::after { content: ''; position: absolute; pointer-events: none; }
+    .splitter::before { inset: 6px 0 auto; border-top: 1px solid #e5edf6; }
+    .splitter::after { width: 24px; height: 3px; top: 5px; left: calc(50% - 12px); border-radius: 2px; background: #a5b8cf; }
+    .splitter:hover::after, .splitter:focus-visible::after { background: #3b72d4; }
+    .result { grid-row: 3; padding: 5px 0 12px; }
     .status { color: #7d8da4; font-size: 11px; line-height: 1.6; } .status[data-phase="error"],.status[data-phase="interrupted"] { color: #ad5935; }
     .output { font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; margin-top: 5px; }
     .answer-label { font-size: 11px; font-weight: 700; line-height: 1.5; color: #8190a5; margin-bottom: 4px; white-space: normal; }
@@ -77,7 +89,7 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     .resize[data-edge="nw"], .resize[data-edge="se"] { cursor: nwse-resize; }
     .resize[data-edge="se"] { width: 15px; height: 15px; }
     .resize[data-edge="se"]::after { content: ''; position: absolute; right: 4px; bottom: 4px; width: 6px; height: 6px; border-right: 1px solid #7b8ba0; border-bottom: 1px solid #7b8ba0; border-radius: 0 0 3px 0; }
-    @media(max-width:320px) { .head { padding-inline: 8px; } .body { padding: 8px 10px; } .foot { padding: 7px 8px; } .expand { margin-left: 0; } }
+    @media(max-width:320px) { .head { padding-inline: 8px; } .body { padding-inline: 10px; } .foot { padding: 7px 8px; } .expand { margin-left: 0; } }
   `;
   const panel = element('section', 'panel'); panel.setAttribute('aria-label', mode === 'explain' ? '结合本文解释' : '中文翻译'); panel.dataset.requestId = message.requestId;
   const head = element('div', 'head');
@@ -103,7 +115,13 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
   const body = element('div', 'body');
   const quote = element('div', 'selection');
   const selected = message.snapshot?.text ?? message.selectionText ?? '';
-  quote.textContent = selected.length > 145 ? `${selected.slice(0, 145)}…` : selected; quote.hidden = !selected;
+  quote.id = 'context-source';
+  quote.append(element('div', 'source-text', selected)); quote.hidden = !selected;
+  const splitter = element('div', 'splitter'); splitter.hidden = !selected; splitter.tabIndex = 0;
+  splitter.title = '上下拖动，调整原文和回答的显示空间';
+  splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-label', '调整原文高度');
+  splitter.setAttribute('aria-orientation', 'horizontal'); splitter.setAttribute('aria-controls', quote.id);
+  const result = element('div', 'result');
   const status = element('div', 'status', message.error || '正在结合所在段落准备回答…'); status.dataset.phase = message.error ? 'error' : 'reading'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const output = element('div', 'output'); output.setAttribute('data-context-output', '');
   const saveNote = element('div', 'status'); saveNote.hidden = true; saveNote.setAttribute('role', 'status'); saveNote.setAttribute('data-context-save-status', '');
@@ -111,7 +129,7 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
   core.append(coreLabel, coreOutput);
   const details = element('section', 'details'); const detailsLabel = element('div', 'answer-label'); const detailsOutput = element('div'); detailsOutput.setAttribute('data-context-details', '');
   details.append(detailsLabel, detailsOutput); output.append(core, details);
-  body.append(quote, status, output, saveNote);
+  result.append(status, output, saveNote); body.append(quote, splitter, result);
   const foot = element('div', 'foot');
   const stop = button('停止', 'stop', () => actions.command('context:stop'));
   const copy = button('复制', 'copy', async () => {
@@ -125,7 +143,14 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
   const save = button('收藏', 'save', () => { saving = true; updateControls(); actions.command('context:save'); });
   const library = button('收藏夹', 'library', () => actions.command('context:open-phrases'));
   const expand = button(exampleKind === 'bilingual' ? '双语例句' : '用法示例', 'expand', () => { transitioning = true; updateControls(); actions.command('context:expand'); }); expand.className = 'expand';
-  foot.append(stop, copy, save, retry, expand, library); panel.append(head, body, foot); shadow.append(style, panel);
+  const followUp = button('追问', 'follow-up', async () => {
+    openingChat = true; updateControls();
+    const error = await actions.followUp?.();
+    openingChat = false;
+    if (error) status.textContent = error;
+    updateControls();
+  });
+  foot.append(stop, copy, save, retry, expand, library, followUp); panel.append(head, body, foot); shadow.append(style, panel);
   document.documentElement.append(host);
   function updateControls(): void {
     stop.disabled = !connected || !busy || transitioning;
@@ -134,6 +159,8 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     save.disabled = !connected || busy || transitioning || saving || saved || phase !== 'done' || !coreText.trim();
     save.textContent = saving ? '保存中…' : saved ? '已收藏' : savedId ? '更新收藏' : '收藏';
     library.disabled = !connected || transitioning;
+    followUp.hidden = !actions.followUp;
+    followUp.disabled = !connected || transitioning || openingChat || phase !== 'done' || !answer.trim();
     expand.disabled = !connected || busy || transitioning || !canExpand || expanded;
     expand.hidden = expanded || !exampleKind || !!message.error;
     expand.textContent = exampleKind === 'bilingual' ? '双语例句' : '用法示例';
@@ -163,28 +190,56 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     return { width, height, offsetLeft, offsetTop, gutter, left: offsetLeft + gutter, top: offsetTop + gutter,
       right: offsetLeft + width - gutter, bottom: offsetTop + height - gutter };
   }
+  const minPanelHeight = () => head.offsetHeight + foot.offsetHeight + splitter.offsetHeight + minResultHeight + 2;
   function position(): void {
     const { width, height, offsetLeft, offsetTop, gutter, left, top, right, bottom } = viewportBounds();
     const initial = placeContextPanel(anchor, width, height);
     const panelWidth = Math.min(layout?.width ?? initial.width, Math.max(0, right - left));
     panel.style.width = `${panelWidth}px`;
+    const preferredHeight = layout?.height ?? splitPanelHeight;
     if (layout) {
       const availableHeight = Math.max(0, height - gutter * 2);
       const maxHeight = layout.height === undefined ? initial.maxHeight : availableHeight;
-      const minHeight = Math.min(maxHeight, head.offsetHeight + foot.offsetHeight + 32);
-      const requiredHeight = layout.height === undefined ? minHeight : clamp(layout.height, minHeight, maxHeight);
+      const minHeight = Math.min(maxHeight, minPanelHeight());
+      const requiredHeight = preferredHeight === undefined ? minHeight : clamp(preferredHeight, minHeight, maxHeight);
       const panelTop = clamp(layout.top, top, bottom - requiredHeight);
-      panel.style.height = layout.height === undefined ? '' : `${requiredHeight}px`;
+      panel.style.height = preferredHeight === undefined ? '' : `${requiredHeight}px`;
       panel.style.left = `${clamp(layout.left, left, right - panelWidth)}px`;
       panel.style.top = `${panelTop}px`;
       panel.style.maxHeight = `${Math.min(maxHeight, Math.max(0, bottom - panelTop))}px`;
       return;
     }
+    panel.style.height = preferredHeight === undefined ? '' : `${preferredHeight}px`;
     panel.style.maxHeight = `${initial.maxHeight}px`;
     // Measure after setting width, since wrapping changes the panel's height.
     const placed = placeContextPanel(anchor, width, height, panel.getBoundingClientRect().height);
     panel.style.left = `${placed.left + offsetLeft}px`; panel.style.top = `${placed.top + offsetTop}px`;
   }
+  const maxSourceHeight = () => Math.max(0, body.clientHeight - splitter.offsetHeight - minResultHeight);
+  function resizeSource(height: number): void {
+    splitPanelHeight ??= panel.getBoundingClientRect().height;
+    body.style.setProperty('--source-height', `${clamp(height, 0, maxSourceHeight())}px`);
+    position();
+  }
+  let splitDrag: { id: number; startY: number; height: number } | undefined;
+  splitter.addEventListener('pointerdown', event => {
+    if (!event.isTrusted || !event.isPrimary || event.button !== 0) return;
+    event.preventDefault();
+    splitter.setPointerCapture(event.pointerId);
+    splitDrag = { id: event.pointerId, startY: event.clientY, height: quote.getBoundingClientRect().height };
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (!event.isTrusted || !splitDrag || splitDrag.id !== event.pointerId || event.clientY === splitDrag.startY && splitPanelHeight === undefined) return;
+    resizeSource(splitDrag.height + event.clientY - splitDrag.startY);
+  });
+  splitter.addEventListener('lostpointercapture', event => { if (splitDrag?.id === event.pointerId) splitDrag = undefined; });
+  splitter.addEventListener('keydown', event => {
+    if (!event.isTrusted) return;
+    const height = quote.getBoundingClientRect().height;
+    const next = { ArrowUp: height - 16, ArrowDown: height + 16, Home: 0, End: maxSourceHeight() }[event.key];
+    if (next === undefined) return;
+    event.preventDefault(); resizeSource(next);
+  });
   function enableGesture(handle: HTMLElement, edge = ''): void {
     let gesture: { id: number; x: number; y: number; rect: DOMRect; moved: boolean } | undefined;
     handle.addEventListener('pointerdown', event => {
@@ -205,7 +260,7 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
           top: clamp(rect.top + dy, bounds.top, bounds.bottom - rect.height) };
       } else {
         const minWidth = Math.min(240, rect.width);
-        const minHeight = Math.min(rect.height, head.offsetHeight + foot.offsetHeight + 32);
+        const minHeight = Math.min(rect.height, minPanelHeight());
         const left = edge.includes('w') ? clamp(rect.left + dx, bounds.left, rect.right - minWidth) : rect.left;
         const right = edge.includes('e') ? clamp(rect.right + dx, rect.left + minWidth, bounds.right) : rect.right;
         const top = edge.includes('n') ? clamp(rect.top + dy, bounds.top, rect.bottom - minHeight) : rect.top;
@@ -228,6 +283,12 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     panel.append(handle); enableGesture(handle, edge);
   }
   const resize = new ResizeObserver(position); resize.observe(panel);
+  const splitResize = new ResizeObserver(() => {
+    splitter.setAttribute('aria-valuemin', '0');
+    splitter.setAttribute('aria-valuemax', String(maxSourceHeight()));
+    splitter.setAttribute('aria-valuenow', String(Math.round(quote.getBoundingClientRect().height)));
+  });
+  if (selected) { splitResize.observe(body); splitResize.observe(quote); }
   window.addEventListener('resize', position);
   window.visualViewport?.addEventListener('resize', position);
   window.visualViewport?.addEventListener('scroll', position);
@@ -237,7 +298,7 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
     layout(): ContextPanelPin | undefined { return layout; },
     contains(event: Event): boolean { return event.composedPath().includes(host); },
     remove(): void {
-      resize.disconnect(); window.removeEventListener('resize', position);
+      resize.disconnect(); splitResize.disconnect(); window.removeEventListener('resize', position);
       window.visualViewport?.removeEventListener('resize', position); window.visualViewport?.removeEventListener('scroll', position); host.remove();
     },
     setState(state: ContextState): void {

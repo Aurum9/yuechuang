@@ -1,6 +1,6 @@
 import './sidepanel.css';
 import { renderChatMarkdown } from './chat-markdown';
-import { CHAT_PORT, MAX_CHAT_INPUT, MAX_CHAT_MESSAGES, type ChatCitation, type ChatCommand, type ChatMessage, type ChatResponseDetails, type ChatSearch, type ChatState } from './chat-shared';
+import { CHAT_PORT, MAX_CHAT_INPUT, MAX_CHAT_MESSAGES, MAX_CHAT_QUOTE, chatInputWithQuote, type ChatCitation, type ChatCommand, type ChatMessage, type ChatReadingEvent, type ChatResponseDetails, type ChatSearch, type ChatState } from './chat-shared';
 import { sanitizeChatCitations, sanitizeChatSearch } from './chat-search';
 import { sanitizeChatDetails } from './chat-details';
 import { siwcStatusText } from './siwc-shared';
@@ -45,7 +45,10 @@ let currentTab: PanelTab = 'chat';
 let port: chrome.runtime.Port | undefined;
 let localError = '';
 let clearRequestId: string | undefined;
-let pendingSubmission: { text: string; previousIds: Set<string>; sawRunning?: boolean } | undefined;
+type PageQuote = Extract<ChatReadingEvent, { type: 'chat:page-quote' }>;
+let pendingSubmission: { text: string; draft: string; quote?: PageQuote; previousIds: Set<string>; sawRunning?: boolean } | undefined;
+let pageQuote: PageQuote | undefined;
+const readingWindow = chrome.windows.getCurrent().then(window => window.id, () => undefined);
 const reconnectDelays = [150, 600, 1600];
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectAttempt = 0;
@@ -59,6 +62,7 @@ const interruptedFragments = new Map<string, InterruptedFragment>();
 
 function switchTab(tab: PanelTab, focus = false): void {
   currentTab = tab;
+  subscribeReadingWindow();
   for (const name of tabNames) {
     const selected = name === tab;
     const button = element<HTMLButtonElement>(`tab-${name}`);
@@ -127,7 +131,46 @@ function inputSize(): void {
   element('chat-suggestions').hidden = !!input.value && suggestedDraft === undefined;
   input.style.height = 'auto';
   input.style.height = `${Math.min(180, Math.max(69, input.scrollHeight))}px`;
-  element('chat-input-count').textContent = `${input.value.length.toLocaleString('en-US')} / 6,000`;
+  element('chat-input-count').textContent = `${chatInputWithQuote(input.value.trim(), pageQuote?.text ?? '').length.toLocaleString('en-US')} / 6,000`;
+}
+function setPageQuote(quote?: PageQuote): void {
+  pageQuote = quote;
+  element('chat-page-quote-text').textContent = quote?.text ?? '';
+  element('chat-page-quote').hidden = !quote;
+  inputSize(); updateControls();
+}
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  const source = pageQuote?.source;
+  if (source && source.windowId === windowId && source.tabId !== tabId) setPageQuote();
+});
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (pageQuote?.source.tabId === tabId) setPageQuote();
+});
+function clearNavigatedQuote({ tabId, frameId }: { tabId: number; frameId: number }): void {
+  const source = pageQuote?.source;
+  if (source?.tabId === tabId && (frameId === 0 || frameId === source.frameId)) setPageQuote();
+}
+chrome.webNavigation.onCommitted.addListener(clearNavigatedQuote);
+chrome.webNavigation.onHistoryStateUpdated.addListener(clearNavigatedQuote);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(clearNavigatedQuote);
+function subscribeReadingWindow(): void {
+  const target = port;
+  if (!target) return;
+  void readingWindow.then(windowId => {
+    if (windowId === undefined || port !== target || pageClosed) return;
+    try { target.postMessage({ type: 'chat:reading-window', windowId, quoteEnabled: currentTab === 'chat' } satisfies ChatCommand); }
+    catch { /* The chat Port reconnects independently. */ }
+  });
+}
+function receiveReadingEvent(value: ChatReadingEvent): void {
+  if (value.type === 'chat:page-quote' && currentTab === 'chat' && typeof value.text === 'string' && value.text.length <= MAX_CHAT_QUOTE) {
+    setPageQuote(value);
+  } else if (value.type === 'chat:follow-up-ready') {
+    if (pageQuote?.text === value.quote && pageQuote.source.tabId === value.source.tabId &&
+        pageQuote.source.documentId === value.source.documentId && pageQuote.source.url === value.source.url) setPageQuote();
+    switchTab('chat');
+    input.focus();
+  }
 }
 function updateControls(): void {
   const active = running();
@@ -135,7 +178,7 @@ function updateControls(): void {
   const connectionReady = state.settingsReady && state.hasKey;
   const ready = loaded && connected && connectionReady;
   sendButton.hidden = active;
-  sendButton.disabled = !ready || active || awaitingSend || !input.value.trim() || input.value.length > MAX_CHAT_INPUT;
+  sendButton.disabled = !ready || active || awaitingSend || !input.value.trim() || chatInputWithQuote(input.value.trim(), pageQuote?.text ?? '').length > MAX_CHAT_INPUT;
   stopButton.hidden = !active;
   stopButton.disabled = !connected || !state.requestId;
   newButton.disabled = !loaded || !connected || (!state.messages.length && !state.error);
@@ -373,8 +416,10 @@ function receive(value: unknown): void {
     if (state.status === 'running') pendingSubmission.sawRunning = true;
     const accepted = state.messages.some(message => message.role === 'user' && message.content === pendingSubmission!.text && !pendingSubmission!.previousIds.has(message.id));
     if (accepted || state.status !== 'running' && (!!state.error || pendingSubmission.sawRunning)) {
-      if (!accepted) {
-        if (!input.value) { input.value = pendingSubmission.text; inputSize(); }
+      if (accepted) {
+        if (pageQuote === pendingSubmission.quote) setPageQuote();
+      } else {
+        if (!input.value) { input.value = pendingSubmission.draft; inputSize(); }
         if (!state.error) localError = '这条问题尚未发送，请重新点击发送。';
       }
       pendingSubmission = undefined;
@@ -433,7 +478,7 @@ function disconnect(): void {
   connected = false;
   loaded = false;
   awaitingSend = false;
-  if (pendingSubmission && !input.value) { input.value = pendingSubmission.text; inputSize(); }
+  if (pendingSubmission && !input.value) { input.value = pendingSubmission.draft; inputSize(); }
   pendingSubmission = undefined;
   if (running()) {
     const assistant = state.messages.at(-1);
@@ -466,7 +511,9 @@ function connectPort(): void {
   try {
     next = chrome.runtime.connect({ name: CHAT_PORT }); port = next;
     next.onMessage.addListener(value => {
-      if (pageClosed || port !== next || portVersion !== version || !validState(value)) return;
+      if (pageClosed || port !== next || portVersion !== version) return;
+      if (value?.type === 'chat:page-quote' || value?.type === 'chat:follow-up-ready') { receiveReadingEvent(value); return; }
+      if (!validState(value)) return;
       clearTimeout(reconnectTimer); reconnectTimer = undefined;
       connected = true; reconnecting = false; reconnectAttempt = 0;
       receive(value);
@@ -479,6 +526,7 @@ function connectPort(): void {
     // A fresh Port restores state only. Questions and destructive commands are
     // sent exclusively by their original trusted controls.
     next.postMessage({ type: 'chat:status' } satisfies ChatCommand);
+    subscribeReadingWindow();
   } catch { disconnect(); }
   updateControls();
 }
@@ -491,13 +539,14 @@ function recoverConnection(): void {
 }
 function submit(): void {
   if (sendButton.disabled || running() || awaitingSend) return;
-  const text = input.value.trim();
-  if (!text || text.length > MAX_CHAT_INPUT) return;
+  const draft = input.value.trim();
+  const text = chatInputWithQuote(draft, pageQuote?.text ?? '');
+  if (!draft || text.length > MAX_CHAT_INPUT) return;
   awaitingSend = true;
-  pendingSubmission = { text, previousIds: new Set(state.messages.map(message => message.id)) };
+  pendingSubmission = { text, draft, quote: pageQuote, previousIds: new Set(state.messages.map(message => message.id)) };
   localError = '';
   updateControls();
-  if (command({ type: 'chat:send', text })) {
+  if (command({ type: 'chat:send', text, quoteSource: pageQuote?.source })) {
     input.value = '';
     inputSize();
     input.focus();
@@ -508,6 +557,7 @@ function submit(): void {
   }
 }
 element<HTMLFormElement>('chat-form').addEventListener('submit', event => { event.preventDefault(); submit(); });
+element('chat-page-quote-remove').addEventListener('click', () => { setPageQuote(); input.focus(); });
 input.addEventListener('input', () => { suggestedDraft = undefined; inputSize(); updateControls(); });
 input.addEventListener('compositionstart', () => { composing = true; });
 input.addEventListener('compositionend', () => { composing = false; });
@@ -526,7 +576,7 @@ element('chat-clear-cancel').addEventListener('click', () => clearDialog.close()
 element('chat-clear-confirm').addEventListener('click', () => {
   if (command({ type: 'chat:clear', ...(clearRequestId ? { requestId: clearRequestId } : {}) })) {
     input.value = '';
-    inputSize();
+    setPageQuote();
   }
   clearDialog.close();
   input.focus();

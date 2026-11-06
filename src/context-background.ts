@@ -11,6 +11,8 @@ import { getChatConnectionView } from './chat-connection';
 import { requestSiwc } from './siwc-background';
 import { WEB_ACCESS_ORIGINS } from './shared';
 import { trustedPage } from './trusted-page';
+import { appendReadingTurn, stageChatPageQuote } from './chat-background';
+import { MAX_CHAT_QUOTE } from './chat-shared';
 
 interface ContextJob {
   id: string; tabId: number; frameId: number; documentId?: string; url?: string;
@@ -378,6 +380,33 @@ export function initializeContextMenus(options?: { beforeRequest?: () => void; c
     });
     chrome.runtime.onConnect.addListener(bindPort);
     chrome.runtime.onMessage.addListener((input, sender, respond) => {
+      if (input?.type === 'context:follow-up') {
+        const tab = sender.tab;
+        const job = tab?.id === undefined ? undefined : jobs.get(tab.id);
+        if (sender.id !== chrome.runtime.id || tab?.id === undefined || !job || job.id !== input.requestId ||
+            job.frameId !== sender.frameId || job.documentId !== sender.documentId || job.url !== sender.url ||
+            job.state.status !== 'done' || !job.snapshot || !job.state.text.trim()) {
+          respond({ ok: false, error: '查阅结果已失效，请重新查阅后再追问。' }); return;
+        }
+        // Chrome requires the open call to run in the original click's task.
+        const opened = chrome.sidePanel.open({ windowId: tab.windowId });
+        const selection = job.snapshot.text;
+        const prompt = `${job.mode === 'translate' ? '请翻译这段网页选区' : '请结合原文解释这段网页选区'}：\n${selection}`;
+        const answer = job.state.text;
+        const source = { windowId: tab.windowId, tabId: tab.id, frameId: job.frameId, documentId: job.documentId!, url: job.url! };
+        void opened.then(() => appendReadingTurn(source, job.id, prompt, answer, selection))
+          .then(() => respond({ ok: true }), error => respond({ ok: false, error: message(error) }));
+        return true;
+      }
+      if (input?.type === 'context:page-quote') {
+        if (sender.id === chrome.runtime.id && sender.tab?.active && sender.tab.id !== undefined && sender.frameId !== undefined && sender.documentId && sender.url &&
+            /^https?:\/\//u.test(sender.url) && typeof input.url === 'string' && typeof input.text === 'string' && input.text.length <= MAX_CHAT_QUOTE && input.text.trim()) {
+          // The sender URL can retain the original address after history.pushState.
+          // The chat worker checks the selected URL against the live frame.
+          void stageChatPageQuote({ windowId: sender.tab.windowId, tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId, url: input.url }, input.text);
+        }
+        return;
+      }
       if (input?.type === 'context:panel-pin') {
         const pin: unknown = input.pin;
         if (pin !== null && !validPanelPin(pin)) { respond({ ok: false }); return; }
