@@ -18,6 +18,8 @@ let permission = true, nextTab = 1, failRevocation = false, failSave = false;
 let tokenError = '', tokenStatus = 400, claimsPatch: Loose = {}, grantedScope = 'openid email offline_access resource.invoke chatgpt.tokens.use.direct';
 let signatureFailure = false, holdExchange = false, refreshCount = 0;
 let holdRevocation: Promise<void> | undefined;
+let holdRefresh: Promise<void> | undefined, refreshSignal: AbortSignal | null | undefined, ignoreRefreshAbort = false;
+const consumedRefreshTokens = new Set<string>();
 const tabs = new Map<number, string>(), closed: number[] = [];
 const api = {
   storage: {
@@ -62,9 +64,20 @@ globalThis.fetch = async (input, init = {}) => {
   if (holdExchange) return await new Promise<Response>((_, reject) => { init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }); });
   if (tokenError) return Response.json({ error: tokenError, error_description: 'PRIVATE_SERVER_ERROR' }, { status: tokenStatus });
   if (form.get('grant_type') === 'refresh_token') {
-    refreshCount++;
-    assert.ok(form.get('refresh_token')?.startsWith('synthetic-refresh-'));
-    return Response.json({ access_token: `synthetic-access-${refreshCount}`, refresh_token: `synthetic-refresh-${refreshCount}`, token_type: 'Bearer', expires_in: 3600, scope: grantedScope });
+    const refreshToken = form.get('refresh_token')!;
+    assert.ok(refreshToken.startsWith('synthetic-refresh-'));
+    if (consumedRefreshTokens.has(refreshToken)) return Response.json({ error: 'invalid_grant' }, { status: 400 });
+    // Rotation consumes the old token before the delayed response reaches the client.
+    consumedRefreshTokens.add(refreshToken);
+    const rotation = ++refreshCount;
+    refreshSignal = init.signal;
+    if (holdRefresh) await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (!ignoreRefreshAbort && init.signal?.aborted) { abort(); return; }
+      if (!ignoreRefreshAbort) init.signal?.addEventListener('abort', abort, { once: true });
+      holdRefresh!.then(() => { init.signal?.removeEventListener('abort', abort); resolve(); }, reject);
+    });
+    return Response.json({ access_token: `synthetic-access-${rotation}`, refresh_token: `synthetic-refresh-${rotation}`, token_type: 'Bearer', expires_in: 3600, scope: grantedScope });
   }
   assert.equal(form.get('redirect_uri'), 'http://127.0.0.1:1455/auth/callback');
   assert.equal(form.get('code_verifier'), session[PENDING].verifier);
@@ -76,6 +89,7 @@ function fixture() {
   updated = new Hub(); removed = new Hub(); navigation = new Hub(); alarms = new Hub();
   permission = true; failRevocation = false; failSave = false; tokenError = ''; tokenStatus = 400; claimsPatch = {}; signatureFailure = false; holdExchange = false; refreshCount = 0;
   holdRevocation = undefined;
+  holdRefresh = undefined; refreshSignal = undefined; ignoreRefreshAbort = false; consumedRefreshTokens.clear();
   grantedScope = 'openid email offline_access resource.invoke chatgpt.tokens.use.direct';
   requests.length = 0; closed.length = 0; tabs.clear();
   const auth = new SiwcAuth(); auth.initialize(); return auth;
@@ -167,6 +181,61 @@ test('concurrent refreshes serialize rotation and a new worker reads the replace
   assert.equal(local[KEY].active.refreshToken, 'synthetic-refresh-1');
   const restarted = new SiwcAuth(); assert.equal((await restarted.call('getAccessToken') as Loose).accessToken, 'synthetic-access-1');
   assert.equal(refreshCount, 1);
+});
+
+test('cancelling a lookup after server rotation preserves the renewed login for a queued chat', async () => {
+  const auth = fixture(); await signedIn(auth); local[KEY].active.expiresAt = 1;
+  let release!: () => void;
+  holdRefresh = new Promise<void>(resolve => { release = resolve; });
+  const lookupController = new AbortController();
+  const lookup = auth.call('getAccessToken', lookupController.signal);
+  const cancelled = assert.rejects(lookup, { name: 'AbortError' });
+  let chat: Promise<unknown> | undefined;
+  try {
+    await until(() => refreshCount === 1);
+    chat = auth.call('getAccessToken'); void chat.catch(() => {});
+    lookupController.abort();
+    release();
+    await cancelled;
+    const credential = await chat as Loose;
+    assert.equal(credential.accessToken, 'synthetic-access-1');
+    assert.equal(local[KEY].active.accessToken, 'synthetic-access-1');
+    assert.equal(local[KEY].active.refreshToken, 'synthetic-refresh-1');
+    assert.equal((await auth.call('status') as Loose).state, 'ready');
+    assert.equal(refreshCount, 1);
+    assert.equal((await auth.call('getAccessToken') as Loose).accessToken, credential.accessToken);
+    assert.equal(refreshCount, 1);
+  } finally {
+    release(); lookupController.abort();
+    await Promise.allSettled([lookup, cancelled, ...(chat ? [chat] : [])]);
+  }
+});
+
+test('logout during refresh rejects a late response and never restores stored credentials', async () => {
+  const auth = fixture(); await signedIn(auth); local[KEY].active.expiresAt = 1;
+  let release!: () => void;
+  holdRefresh = new Promise<void>(resolve => { release = resolve; });
+  // A response already delivered by the transport may arrive after its signal is aborted.
+  ignoreRefreshAbort = true;
+  const refresh = auth.call('getAccessToken');
+  const rejected = assert.rejects(refresh, { name: 'AbortError' });
+  let logout: Promise<unknown> | undefined;
+  try {
+    await until(() => refreshCount === 1);
+    logout = auth.call('logout'); void logout.catch(() => {});
+    await until(() => refreshSignal?.aborted === true);
+    release();
+    await rejected;
+    assert.equal((await logout as Loose).state, 'signedOut');
+    assert.equal(local[KEY].active, undefined);
+    assert.equal((await auth.call('status') as Loose).state, 'signedOut');
+    await assert.rejects(auth.call('getAccessToken'), (e: unknown) => e instanceof SiwcFailure && e.code === 'signedOut');
+    assert.ok(!JSON.stringify(local).includes('synthetic-access'));
+    assert.ok(!JSON.stringify(local).includes('synthetic-refresh'));
+    assert.equal(refreshCount, 1);
+  } finally {
+    release(); await Promise.allSettled([refresh, rejected, ...(logout ? [logout] : [])]);
+  }
 });
 test('transient refresh failure preserves credentials; a terminal refresh failure clears unusable tokens', async () => {
   const auth = fixture(); await signedIn(auth); local[KEY].active.expiresAt = 1;

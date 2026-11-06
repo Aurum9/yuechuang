@@ -247,8 +247,10 @@ export class SiwcAuth {
         if (!a || a.needsLogin) throw new SiwcFailure('signedOut');
         if (!a.scopes.includes('chatgpt.tokens.use.direct') || !a.scopes.includes('resource.invoke')) throw new SiwcFailure('planDenied');
         if (a.expiresAt <= Date.now() + 60_000) {
+          // Rotation belongs to this account session. A caller stopping its
+          // answer must not discard replacement credentials already issued by
+          // the server. Explicit auth cancellation/logout still owns this controller.
           const controller = new AbortController(); this.controllers.add(controller);
-          const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true });
           const generation = this.generation;
           try {
             const value = await this.exchange({ grant_type: 'refresh_token', client_id: a.clientId, refresh_token: a.refreshToken }, controller.signal);
@@ -260,13 +262,16 @@ export class SiwcAuth {
             controller.signal.throwIfAborted();
             if (generation !== this.generation) throw aborted();
             saved.active = { ...a, ...this.tokens(value, a), idToken }; await this.save(saved);
+            controller.signal.throwIfAborted();
+            if (generation !== this.generation) throw aborted();
           } catch (error) {
             if (error instanceof SiwcFailure && error.code === 'signedOut') {
               saved.active = { ...a, accessToken: '', refreshToken: '', needsLogin: true }; await this.save(saved);
             }
             throw error;
-          } finally { this.controllers.delete(controller); signal?.removeEventListener('abort', abort); }
+          } finally { this.controllers.delete(controller); }
         }
+        signal?.throwIfAborted();
         if (!saved.active!.scopes.includes('chatgpt.tokens.use.direct') || !saved.active!.scopes.includes('resource.invoke')) throw new SiwcFailure('planDenied');
         return { accessToken: saved.active!.accessToken, expiresAt: saved.active!.expiresAt, accountId: saved.active!.id };
       });
