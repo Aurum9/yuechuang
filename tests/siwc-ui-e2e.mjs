@@ -115,6 +115,13 @@ try {
         return port;
       },
     };
+    globalThis.chrome.windows = { async getCurrent() { return { id: 1 }; } };
+    globalThis.chrome.tabs = { onActivated: { addListener() {} }, onRemoved: { addListener() {} } };
+    globalThis.chrome.webNavigation = {
+      onCommitted: { addListener() {} },
+      onHistoryStateUpdated: { addListener() {} },
+      onReferenceFragmentUpdated: { addListener() {} },
+    };
     globalThis.chrome.storage = { onChanged: { addListener() {} } };
     globalThis.chrome.permissions = {
       async request(value) { mock.permissions.push(copy(value)); return true; },
