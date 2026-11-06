@@ -229,7 +229,9 @@ try {
     await source.evaluate(() => getSelection()?.removeAllRanges());
   });
   await check('trusted selection shows compact toolbar with zero API; DOM.click has no effect', async () => {
-    await gotoContext(true); fixtures.reset(); assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
+    await gotoContext(true); fixtures.reset();
+    await source.addStyleTag({ content: 'html > [data-local-reader-root] { visibility: hidden !important; }' });
+    assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
     for (const name of ['translate', 'explain', 'close']) await tool(source, name).evaluate(node => node.click());
     await sleep(200); assert.equal(count(), 0); assert.equal(await host(source).count(), 0); assert.equal(await toolbar(source).isVisible(), true);
     assert.equal((await selected(source)).trim(), 'resilience'); report.testHarness.toolbarSyntheticClickRejected = true;
@@ -237,6 +239,7 @@ try {
   });
   await check('translate click makes exactly one request and preserves the real selection', async () => {
     await clickToolbar(source, 'translate'); assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(count(), 1);
+    assert.equal(await panel(source).isVisible(), true);
     assert.equal(latest().contextMode, 'translate'); assert.equal(input().selection.trim(), 'resilience'); assert.equal((await selected(source)).trim(), 'resilience');
     assert.match(prompt(), /完整译|完整翻译/); assert.match(input().paragraphContext, /FOREIGN_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /FOREIGN_NEAR_AFTER_SENTINEL/);
     assert.doesNotMatch(JSON.stringify(latest().body), /CONTEXT_FORM_SECRET|CONTEXT_HIDDEN_SECRET|GLOBAL_NAV_NO_CONTEXT_SECRET/);

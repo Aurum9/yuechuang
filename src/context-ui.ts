@@ -32,7 +32,7 @@ export function createContextPanel(message: ContextShowMessage, fallbackRect: Co
   const anchor = message.snapshot?.rect ?? fallbackRect;
   const host = document.createElement('local-reader-context');
   host.setAttribute('data-local-reader-root', 'context');
-  for (const [key, value] of Object.entries({ position: 'fixed', inset: '0', 'z-index': '2147483647', 'pointer-events': 'none', margin: '0', padding: '0', border: '0', display: 'block' })) host.style.setProperty(key, value, 'important');
+  for (const [key, value] of Object.entries({ position: 'fixed', inset: '0', 'z-index': '2147483647', 'pointer-events': 'none', margin: '0', padding: '0', border: '0', display: 'block', visibility: 'visible' })) host.style.setProperty(key, value, 'important');
   const shadow = host.attachShadow({ mode: 'open' });
   const style = document.createElement('style');
   style.textContent = `
