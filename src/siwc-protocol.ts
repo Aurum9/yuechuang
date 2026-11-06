@@ -10,7 +10,7 @@ export const SIWC_ERRORS = {
   authBusy: '已有 ChatGPT 登录正在进行，请完成或取消后重试。',
   signedOut: '请先在设置中登录 ChatGPT 并授权套餐用量。',
   planDenied: '账号身份已验证，尚未授权 ChatGPT 套餐用量，请重新登录并确认授权。',
-  permission: '请在设置中授权访问 OpenAI 登录、API 和本机登录回调。',
+  permission: '请在 Chrome 的扩展详情中检查阅窗的网站访问权限。',
   network: 'OpenAI 官方 API 连接失败，请检查网络后手动重试。',
   denied: 'OpenAI 拒绝了本次请求，请检查账号的套餐用量授权。',
   quota: '当前套餐用量或应用用量限制已达到，请查看 ChatGPT 设置中的用量。',

@@ -1,5 +1,6 @@
 import './research-page.css';
 import './panel-embed';
+import { allowedUrl } from './core';
 import { researchActive, researchInput, researchMarkdown, RESEARCH_PORT, type ResearchClaim, type ResearchSource, type ResearchTask, type SavedResearch } from './research-shared';
 
 function element<T extends HTMLElement>(id: string): T {
@@ -58,11 +59,8 @@ function origins(values: string[]): string[] {
   return [...new Set(values.map(value => { const url = new URL(value); return `${url.protocol}//${url.hostname}/*`; }))];
 }
 function safeUrl(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    if (!url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) return url.href;
-  } catch { /* Unusable source URLs remain plain text. */ }
-  return undefined;
+  try { return allowedUrl(value).href; }
+  catch { return undefined; }
 }
 function dateText(timestamp: number): string {
   const value = new Date(timestamp);
@@ -76,14 +74,13 @@ function updateControls(): void {
   try { input(); valid = true; } catch (error) { inputError = errorText(error); }
   question.disabled = busy || active;
   urls.disabled = busy || active;
-  element<HTMLButtonElement>('authorize').disabled = busy || active || !valid || !connected;
   element<HTMLButtonElement>('start-research').disabled = busy || active || !valid || !loaded || !hasKey || !settingsReady || !authorized || !connected;
   element<HTMLButtonElement>('stop-research').disabled = busy || !active || !connected;
   element<HTMLButtonElement>('stop-research').hidden = !active;
   const start = element<HTMLButtonElement>('start-research');
   start.textContent = busy ? '处理中…' : active ? '研究进行中…' : '开始研究 →';
   const ready = element('ready-state');
-  let text = !loaded ? '正在检查配置…' : !connected ? '连接已断开，请重新加载扩展并刷新此页。' : active ? '任务进行中，可随时停止；请保持此页打开。' : !settingsReady || !hasKey ? '请先在设置页配置模型、Key，并授权模型接口。' : !valid ? inputError : !authorized ? '开始前，请点击「授权所填网站」。' : '配置和网站权限已就绪，点击开始后才会调用模型。';
+  let text = !loaded ? '正在检查配置…' : !connected ? '连接已断开，请重新加载扩展并刷新此页。' : active ? '任务进行中，可随时停止；请保持此页打开。' : !settingsReady || !hasKey ? '请先在设置页配置模型和 Key，并检查 Chrome 的网站访问权限。' : !valid ? inputError : !authorized ? '请在 Chrome 的扩展详情中检查阅窗的网站访问权限。' : '配置和网站权限已就绪，点击开始后才会调用模型。';
   ready.textContent = text;
   ready.classList.toggle('needs-attention', loaded && (!connected || !settingsReady || !hasKey || (valid && !authorized)));
   element('question-count').textContent = `${question.value.length.toLocaleString('en-US')} / 1,500`;
@@ -345,23 +342,6 @@ async function poll(): Promise<void> {
 
 question.addEventListener('input', () => { void checkInputPermissions(); });
 urls.addEventListener('input', () => { void checkInputPermissions(); });
-element('authorize').addEventListener('click', () => {
-  if (busy || researchActive(current)) return;
-  try {
-    const values = input();
-    // Keep the request inside the trusted click, before any await.
-    const request = chrome.permissions.request({ origins: origins(values.urls) });
-    busy = true; updateControls();
-    void (async () => {
-      try {
-        const granted = await request;
-        await checkInputPermissions();
-        report(granted ? '所填网站已授权。开始研究后，将只读取本次提交的文档链接。' : '授权未完成。你可以再次点击授权，或调整文档链接。', !granted);
-      } catch (error) { report(errorText(error), true); }
-      finally { busy = false; updateControls(); }
-    })();
-  } catch (error) { report(errorText(error), true); }
-});
 element<HTMLFormElement>('research-form').addEventListener('submit', event => {
   event.preventDefault();
   if (busy || researchActive(current)) return;

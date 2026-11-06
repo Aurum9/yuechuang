@@ -1,8 +1,9 @@
 import './options.css';
 import './panel-embed';
 import { DEFAULT_SETTINGS, type Settings, type SettingsView } from './shared';
+import { HIDDEN_TOOLBAR_SITES } from './context-shared';
 import type { ChatConnectionConfig, ChatConnectionView } from './chat-connection-shared';
-import { SIWC_API_ORIGIN, SIWC_AUTH_ORIGINS, siwcStatusText, type SiwcView } from './siwc-shared';
+import { SIWC_API_ORIGIN, siwcStatusText, type SiwcView } from './siwc-shared';
 import { formatSiwcDiagnostics, siwcDiagnosticText } from './siwc-diagnostics';
 
 type Response = { ok: true; [key: string]: unknown } | { ok: false; error: string };
@@ -25,7 +26,6 @@ const feedback = element<HTMLDivElement>('feedback');
 const saveState = element<HTMLSpanElement>('save-state');
 const testButton = element<HTMLButtonElement>('test-connection');
 const keyClearButton = element<HTMLButtonElement>('clear-key');
-const permissionInput = element<HTMLInputElement>('permission-origin');
 document.querySelector<HTMLAnchorElement>('.brand')?.addEventListener('click', event => {
   event.preventDefault();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -110,38 +110,33 @@ function updateDirty(): void {
   saveState.classList.toggle('is-dirty', dirty);
 }
 
-function renderPermissions(origins: string[]): void {
-  const list = element<HTMLUListElement>('permission-list');
+async function refreshHiddenToolbarSites(): Promise<void> {
+  const { sites } = await message('context:toolbar-sites');
+  const list = element<HTMLUListElement>('hidden-toolbar-sites');
   list.replaceChildren();
-  const sorted = [...origins].sort();
-  element('permission-count').textContent = `${sorted.length} 条`;
-  const broadHttps = origins.includes('https://*/*');
-  element('permission-status').textContent = broadHttps ? 'HTTPS 网页访问已启用' : origins.length ? '已按域授权，请确认来源页、目标页及接口均已覆盖' : '尚未授权；授权后可识别链接拖动并读取正文';
-  element('permission-dot').classList.toggle('is-enabled', origins.length > 0);
-  element<HTMLButtonElement>('grant-https').textContent = broadHttps ? 'HTTPS 访问已授权' : '启用 HTTPS 网页访问';
-  if (!sorted.length) {
+  if (!Array.isArray(sites) || !sites.length) {
     const empty = document.createElement('li');
     empty.className = 'permission-empty';
-    empty.textContent = '暂无网站授权';
+    empty.textContent = '暂无隐藏的网站';
     list.append(empty);
+    return;
   }
-  for (const origin of sorted) {
+  for (const hostname of sites as string[]) {
     const item = document.createElement('li');
     const label = document.createElement('span');
-    label.textContent = origin;
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove-permission';
-    remove.textContent = '撤销';
-    remove.setAttribute('aria-label', `撤销 ${origin} 的访问权限`);
-    remove.addEventListener('click', () => {
+    label.textContent = hostname;
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'remove-permission';
+    restore.textContent = '恢复显示';
+    restore.setAttribute('aria-label', `恢复在 ${hostname} 显示划词工具条`);
+    restore.addEventListener('click', () => {
       void perform(async () => {
-        const removed = await chrome.permissions.remove({ origins: [origin] });
-        await refresh(false);
-        report(removed ? `已撤销 ${origin} 的访问权限，相关摘要任务将停止。` : '该权限未被移除，请检查浏览器扩展权限设置。', removed ? 'success' : 'error');
+        await message('context:toolbar-restore-site', { hostname });
+        await refreshHiddenToolbarSites();
       });
     });
-    item.append(label, remove);
+    item.append(label, restore);
     list.append(item);
   }
 }
@@ -167,7 +162,6 @@ async function refresh(replaceForm: boolean): Promise<SettingsView> {
   const warning = element<HTMLDivElement>('storage-warning');
   warning.textContent = view.warning || '';
   warning.hidden = !view.warning;
-  renderPermissions(view.permissions);
   updateEndpoint();
   updateDirty();
   return view;
@@ -340,10 +334,7 @@ connectionForm.addEventListener('submit', event => {
 
 function requestSiwc(type: 'siwc:login' | 'siwc:refresh', newAccount = false): void {
   if (busy || connectionBusy || !connectionLoaded) return;
-  // Keep the optional API permission request inside the trusted button gesture.
-  const grant = chrome.permissions.request({ origins: [...SIWC_AUTH_ORIGINS] });
   void performConnection(async () => {
-    if (!await grant) throw new Error('尚未获得 OpenAI 登录、API 和本机登录回调权限。请再次点击并授权。');
     siwcAuthorizing = type === 'siwc:login';
     updateConnectionControls();
     connectionReport(type === 'siwc:login' ? '请在打开的 OpenAI 页面完成登录，并授权套餐用量。完成后会返回这里，尚未发送聊天问题。' : '正在检查登录授权和可用模型…');
@@ -445,35 +436,6 @@ testButton.addEventListener('click', () => {
   });
 });
 
-function requestOrigins(origins: string[]): void {
-  if (busy) return;
-  // Call request synchronously from the click handler to retain Chrome's user gesture.
-  const request = chrome.permissions.request({ origins });
-  void perform(async () => {
-    const granted = await request;
-    await refresh(false);
-    report(granted ? '访问权限已授予。若网页尚未出现预览投放区，请刷新该网页。' : '授权未完成。你可以稍后再试，或仅授权指定的域。', granted ? 'success' : 'info');
-  });
-}
-
-element('grant-https').addEventListener('click', () => requestOrigins(['https://*/*']));
-element('grant-local').addEventListener('click', () => requestOrigins(['http://localhost/*', 'http://127.0.0.1/*']));
-element('grant-origin').addEventListener('click', () => {
-  try {
-    let url: URL;
-    try { url = new URL(permissionInput.value.trim()); }
-    catch { throw new Error('请输入完整的网站地址，如 https://example.com。'); }
-    if (url.username || url.password) throw new Error('网站地址请勿包含账号或密码。');
-    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) {
-      throw new Error('只能授权 HTTPS 网站，或 localhost / 127.0.0.1 的 HTTP 地址。');
-    }
-    requestOrigins([`${url.protocol}//${url.hostname}/*`]);
-  } catch (error) {
-    report(error instanceof Error ? error.message : '请输入完整的网站地址，如 https://example.com。', 'error');
-    permissionInput.focus();
-  }
-});
-
 element('clear-cache').addEventListener('click', () => {
   void perform(async () => {
     await message('settings:clear-cache');
@@ -540,9 +502,14 @@ window.addEventListener('message', event => {
   if (event.data.type === 'reader:connection-state') refreshSiwcStatus();
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshConnectionStatus(); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && HIDDEN_TOOLBAR_SITES in changes) void refreshHiddenToolbarSites().catch(() => {});
+});
 chrome.permissions.onAdded.addListener(() => { void refresh(false).catch(() => undefined); refreshConnectionStatus(); });
 chrome.permissions.onRemoved.addListener(() => { void refresh(false).catch(() => undefined); refreshConnectionStatus(); });
 
-void perform(async () => { await refresh(true); });
+void perform(async () => {
+  await Promise.all([refresh(true), refreshHiddenToolbarSites()]);
+});
 refreshConnectionConfig(true);
 refreshSiwcStatus(true);

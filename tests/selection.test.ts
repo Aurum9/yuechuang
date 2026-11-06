@@ -162,9 +162,6 @@ async function installUiFixture() {
     const runtimeMessages: Listener[] = [];
     const ports: any[] = [];
     const fixture: any = { messages, runtimeMessages, ports, escapedParent: 0, serial: 0, current: undefined };
-    // about:blank has no secure origin. Production runs only on authorized
-    // HTTPS/loopback pages, where the browser supplies crypto.randomUUID.
-    if (!crypto.randomUUID) Object.defineProperty(crypto, 'randomUUID', { value: () => `unit-capture-${++fixture.serial}` });
     const sender = { id: 'selection-test', url: 'chrome-extension://selection-test/background.js' };
     const notify = (message: any) => { let response: any; runtimeMessages.forEach(listener => listener(message, sender, (value: any) => { response = value; })); return response; };
     fixture.notify = notify;

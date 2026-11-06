@@ -106,7 +106,7 @@ test('invalid payloads, schemes, credentials and length limits reject without mo
   const invalid: unknown[] = [null, [], {}, ...[
     { text: '' }, { text: ' \n ' }, { text: 'x'.repeat(6001) }, { text: 4 }, { context: 'x'.repeat(10001) }, { context: null },
     { sourceTitle: 'x'.repeat(501) }, { sourceTitle: false }, { sourceUrl: 'x'.repeat(8193) },
-    { sourceUrl: 'javascript:alert(1)' }, { sourceUrl: 'file:///private.txt' }, { sourceUrl: 'http://remote.test/page' },
+    { sourceUrl: 'javascript:alert(1)' }, { sourceUrl: 'file:///private.txt' }, { sourceUrl: 'ftp://remote.test/page' },
     { sourceUrl: 'https://user:password@article.test/' }, { sourceUrl: 'https://article.test/\npage' },
     { mode: 'search' }, { coreText: '' }, { coreText: 'x'.repeat(MAX_PHRASE_ANSWER + 1) }, { detailsText: 'x'.repeat(MAX_PHRASE_ANSWER + 1) },
     { detailsText: null }, { exampleKind: 'unknown' }, { mode: 'explain', exampleKind: 'bilingual' }, { mode: 'translate', exampleKind: 'usage' }
@@ -115,7 +115,7 @@ test('invalid payloads, schemes, credentials and length limits reject without mo
   for (const id of ['', 'bad id', 'x'.repeat(101), 5]) await assert.rejects(deletePhrase(id as string));
   assert.equal(JSON.stringify(local.savedPhrases), bytes); assert.equal(calls.localSet.length, 1);
   assert.deepEqual(await listPhrases(), [original.entry]);
-  for (const sourceUrl of ['http://localhost:4317/article', 'http://127.0.0.1:4317/article']) assert.equal((await savePhrase(input({ sourceUrl }))).created, true);
+  for (const sourceUrl of ['http://localhost:4317/article', 'http://127.0.0.1:4317/article', 'http://remote.test/page']) assert.equal((await savePhrase(input({ sourceUrl }))).created, true);
 });
 
 test('500 entry limit rejects new entries without eviction while updates and deletes remain usable', async () => {

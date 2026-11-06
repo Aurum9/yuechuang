@@ -149,51 +149,12 @@ try {
   await source.goto(`${fixtures.origin}/index`);
 
   await check('M1-15 initial permission boundary', async () => {
-    const state = await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }));
-    assert.deepEqual(state.permissions, []);
+    assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://*/*', 'https://*/*'] })), true);
     assert.equal(await source.locator('local-reader-preview').count(), 0);
     assert.equal(count(), 0);
-    return 'Fresh profile has no optional host permissions and makes no model requests.';
+    return 'Fresh profile has website access and makes no model requests.';
   });
 
-  // Headless Chromium cannot confirm the browser-owned optional-permission dialog.
-  // Bootstrap only this throwaway profile with loopback access, then restore the
-  // byte-identical production manifest before running any functional checks.
-  // dist/ is never changed. The fresh, ungranted production build was checked above.
-  await context.close();
-  const testExtension = path.join(profile, 'test-extension');
-  assertTestDirectory(testExtension);
-  await fs.cp(path.join(root, 'dist'), testExtension, { recursive: true });
-  const manifestFile = path.join(testExtension, 'manifest.json');
-  const productionManifest = await fs.readFile(manifestFile, 'utf8');
-  await fs.writeFile(manifestFile, JSON.stringify({ ...JSON.parse(productionManifest), host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
-  context = await chromium.launchPersistentContext(profile, {
-    channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 },
-    args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'],
-  });
-  context.setDefaultTimeout(8_000);
-  context.on('request', request => { if (request.url().startsWith('http')) report.network.push({ method: request.method(), url: request.url() }); });
-  worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
-  id = new URL(worker.url()).hostname;
-  const browserSettings = await context.newPage();
-  await browserSettings.goto('chrome://extensions');
-  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await fs.writeFile(manifestFile, productionManifest);
-  assert.deepEqual(await hashDirectory(testExtension), testedFiles, 'Test copy differs from production after restoring the manifest');
-  await browserSettings.evaluate(id => chrome.developerPrivate.reload(id), id);
-  await sleep(600);
-  assert.equal(await fs.readFile(manifestFile, 'utf8'), await fs.readFile(path.join(root, 'dist/manifest.json'), 'utf8'));
-  options = await context.newPage();
-  await options.goto(`chrome-extension://${id}/options.html`);
-  await until(() => options.locator('#save-settings').isEnabled(), 'reloaded settings page did not initialize');
-  await options.locator('#grant-local').click();
-  assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*', 'http://localhost/*'] })), true);
-  worker = await until(() => context.serviceWorkers().find(candidate => candidate.url().includes(id)), 'reloaded worker missing');
-  await browserSettings.close();
-  source = await context.newPage();
-  await source.goto(`${fixtures.origin}/index`);
-  report.extensionId = id;
-  report.notes.push('Functional checks use a throwaway copy of dist with byte-identical production manifest restored after test-only loopback preauthorization. The native optional-host permission confirmation dialog remains a manual Chrome check.');
   if (focus === 'reuse') {
     await worker.evaluate(() => {
       const trace = [];
@@ -432,7 +393,13 @@ try {
     await source.goto(fixtures.origin+'/index');
   });
   await check('M1-15 redirect to ungranted final origin makes no model call',async()=>{
-    await settings({auto:true}); await options.evaluate(()=>chrome.permissions.remove({origins:['http://localhost/*']})); await sleep(500);
+    await settings({auto:true});
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    await manager.evaluate(async id => {
+      await chrome.developerPrivate.updateExtensionConfiguration({ extensionId: id, hostAccess: 'ON_CLICK' });
+      await chrome.developerPrivate.addHostPermission(id, 'http://127.0.0.1/*');
+    }, id);
+    await manager.close(); await sleep(500);
     fixtures.reset(); await drag('redirect','/redirect',{ready:false});
     const finalFrame=await targetFrame(); await until(()=>finalFrame.url().includes('localhost:4317/article-b'),'redirect final page did not load');
     assert.match(await finalFrame.locator('article').innerText(),/ARTICLE_B_SENTINEL/);
@@ -442,7 +409,9 @@ try {
     assert.equal((await options.evaluate(()=>chrome.windows.getAll())).filter(win=>win.type==='popup').length,0);
   });
   await check('M1-15 revocation disables previously injected source drag',async()=>{
-    await options.evaluate(()=>chrome.permissions.remove({origins:['http://127.0.0.1/*']})); await sleep(500); fixtures.reset();
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    await manager.evaluate(id => chrome.developerPrivate.removeHostPermission(id, 'http://127.0.0.1/*'), id);
+    await manager.close(); await sleep(500); fixtures.reset();
     await source.bringToFront(); const link=source.locator('#article-a'); await link.scrollIntoViewIfNeeded();const box=await link.boundingBox();
     await source.mouse.move(box.x+25,box.y+10);await source.mouse.down();await source.mouse.move(box.x+100,box.y+35,{steps:12});await source.mouse.up();
     assert.equal(await panel(source).count(),0);assert.equal(count(),0);
@@ -451,7 +420,7 @@ try {
     await context.close();
     context = await chromium.launchPersistentContext(profile, {
       channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 },
-      args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'],
+      args: [`--disable-extensions-except=${path.join(root, 'dist')}`, `--load-extension=${path.join(root, 'dist')}`, '--no-first-run'],
     });
     context.setDefaultTimeout(8_000);
     options = await context.newPage();
@@ -486,7 +455,7 @@ try {
     assert.ok(!JSON.stringify(view).includes(fakeKey));
   });
 
-  report.notes.push('Real Chrome, real provider, real technical/foreign articles, native optional-permission confirmation and native context menu/tab-strip actions remain explicitly pending manual acceptance.');
+  report.notes.push('Real Chrome, real provider, real technical/foreign articles, native installation confirmation and native context menu/tab-strip actions remain explicitly pending manual acceptance.');
 } catch (error) {
   fatal = error;
   report.fatal = error.message;

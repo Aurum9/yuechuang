@@ -64,7 +64,7 @@ function sourceUrl(value: string): string | undefined {
   try {
     const url = new URL(value);
     if (url.username || url.password) return undefined;
-    if (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) return url.href;
+    if (['http:', 'https:'].includes(url.protocol)) return url.href;
   } catch { /* Invalid source URLs stay as plain text. */ }
   return undefined;
 }

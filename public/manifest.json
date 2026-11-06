@@ -13,10 +13,9 @@
     "sidePanel",
     "alarms"
   ],
-  "optional_host_permissions": [
+  "host_permissions": [
     "https://*/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js",

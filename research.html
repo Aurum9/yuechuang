@@ -24,8 +24,8 @@
           <p id="question-hint" class="field-hint">问题越具体，资料之间的比较越有帮助。</p>
           <label for="urls">文档链接 <span id="url-count">每行一个</span></label>
           <textarea id="urls" rows="5" spellcheck="false" placeholder="https://example.com/docs/first&#10;https://example.com/docs/second" aria-describedby="urls-hint"></textarea>
-          <p id="urls-hint" class="field-hint">支持 HTTPS 网页及本机 HTTP；请填写文章或文档的完整地址。</p>
-          <div class="setup-actions"><button id="authorize" type="button" class="button button-secondary">授权所填网站</button><button id="start-research" type="submit" class="button button-primary" disabled>开始研究 <span aria-hidden="true">→</span></button></div>
+          <p id="urls-hint" class="field-hint">请填写 HTTP 或 HTTPS 文章和文档的完整地址。</p>
+          <div class="setup-actions"><button id="start-research" type="submit" class="button button-primary" disabled>开始研究 <span aria-hidden="true">→</span></button></div>
           <p id="ready-state" class="ready-state" role="status" aria-live="polite">正在检查配置…</p>
         </form>
         <aside class="scope-note" aria-label="研究范围"><span class="scope-mark" aria-hidden="true">阅</span><h3>让资料说得清楚</h3><ol><li>依次打开临时阅读标签，读取后关闭。</li><li>每篇提取与问题有关的要点和原文引句。</li><li>汇总比较，点击引用即可核对出处。</li></ol><p>每次任务最多调用模型 <strong>6 次</strong>。请保持此任务页打开；关闭页面会停止任务。</p><p>需要分析的网页正文会发送到你配置的模型接口。任务结束后，可手动保存报告到本机。</p><a href="options.html">配置模型与 Key ↗</a></aside>
@@ -35,7 +35,7 @@
 
       <div class="workspace">
         <section id="task-panel" class="task-panel" aria-label="研究结果">
-          <div id="task-empty" class="empty-state"><span class="empty-mark" aria-hidden="true">研</span><h2>从一个问题开始</h2><p>填入资料链接，完成网站授权后开始研究。报告和证据会在这里逐步出现。</p></div>
+          <div id="task-empty" class="empty-state"><span class="empty-mark" aria-hidden="true">研</span><h2>从一个问题开始</h2><p>填入资料链接即可开始研究。报告和证据会在这里逐步出现。</p></div>
           <div id="task-content" hidden>
             <div class="result-header"><div><p id="view-label" class="eyebrow">当前任务</p><h2 id="task-question"></h2></div><span id="task-status" class="status-badge"></span></div>
             <div class="task-meta"><p id="task-stage" role="status" aria-live="polite"></p><span id="call-count"></span></div>

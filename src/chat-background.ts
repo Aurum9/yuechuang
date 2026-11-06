@@ -134,7 +134,7 @@ async function send(port: chrome.runtime.Port, input: unknown): Promise<void> {
       if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置中填写接口地址、模型和 API Key。');
       validateSettings(settings);
       state.settingsReady = await chrome.permissions.contains({ origins: [allowedUrl(settings.baseUrl).origin + '/*'] }); current(active);
-      if (!state.settingsReady) throw new Error('模型接口尚未授权，请在设置中授权接口域名。');
+      if (!state.settingsReady) throw new Error('模型接口尚未授权，请在 Chrome 的扩展详情中检查网站访问权限。');
     }
     if (typeof input === 'string' && key && input.includes(key)) throw new Error('请勿在对话中发送当前配置的 API Key。本次没有调用模型。');
     const plan = planChat(settings, state.messages, input, view.config.provider);

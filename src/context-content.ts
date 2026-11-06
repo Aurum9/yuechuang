@@ -42,6 +42,7 @@ export function bootContextReading(): void {
   let dragging = false;
   let suppressUntil = 0;
   let enabled = false;
+  let toolbarHiddenForDocument = false;
   let eligibilityVersion = 0;
   let eligibilityPending: Promise<void> | undefined;
   let shownCaptureId: string | undefined;
@@ -85,7 +86,7 @@ export function bootContextReading(): void {
   function isReaderEvent(event: Event): boolean { return event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-local-reader-root')); }
   async function finishSelection(point?: { x: number; y: number }): Promise<void> {
     navigation();
-    if (dragging || Date.now() < suppressUntil) return;
+    if (toolbarHiddenForDocument || dragging || Date.now() < suppressUntil) return;
     const version = ++gestureVersion;
     const result = captureContextSelection(document, Date.now(), point);
     const identity = selectionIdentity(document);
@@ -95,10 +96,20 @@ export function bootContextReading(): void {
     if (!enabled || version !== gestureVersion || !sameSelection(identity, document) || location.href !== result.snapshot.url) return;
     // No model or content upload occurs here. The nonce identifies exactly this
     // completed gesture; a later click authorizes the background to request it.
-    selected = { id: crypto.randomUUID(), snapshot: result.snapshot, identity };
+    const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), word => word.toString(16).padStart(8, '0')).join('');
+    selected = { id, snapshot: result.snapshot, identity };
     trackedSelection = identity; menuRect = result.snapshot.rect;
     removeToolbar();
-    toolbar = createSelectionToolbar(selected.id, result.snapshot.rect, { start: mode => { void startSelection(mode); }, close: dismissAll });
+    toolbar = createSelectionToolbar(id, result.snapshot.rect, {
+      start: mode => { void startSelection(mode); },
+      hidePage: () => { toolbarHiddenForDocument = true; dismissAll(); },
+      hideSite: async () => {
+        const response = await chrome.runtime.sendMessage({ type: 'context:toolbar-hide-site' });
+        if (!response?.ok) throw new Error('隐藏网站失败，请重试。');
+        dismissAll();
+        void refreshEligibility();
+      }
+    });
   }
   async function startSelection(mode: ContextMode): Promise<void> {
     const capture = selected;
@@ -211,8 +222,12 @@ export function bootContextReading(): void {
     });
     return { ok: true };
   }
-  chrome.runtime.onMessage.addListener((message: ContextCaptureMessage | ContextShowMessage | { type: 'permissions:changed' | 'context:closed'; requestId?: string }, sender, respond) => {
+  chrome.runtime.onMessage.addListener((message: ContextCaptureMessage | ContextShowMessage | { type: 'permissions:changed' | 'context:closed'; requestId?: string } | { type: 'context:toolbar-site-changed'; hostname: string }, sender, respond) => {
     if (!isBackgroundSender(sender)) return;
+    if (message.type === 'context:toolbar-site-changed') {
+      if (message.hostname === location.hostname) { enabled = false; dismissAll(); void refreshEligibility(); }
+      return;
+    }
     if (message.type === 'permissions:changed') { enabled = false; dismissAll(); void refreshEligibility(); return; }
     if (message.type === 'context:closed') { if (!message.requestId || message.requestId === currentId) dismissAll(); return; }
     if (message.type === 'context:capture') {

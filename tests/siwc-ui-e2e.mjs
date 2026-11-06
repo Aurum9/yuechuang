@@ -68,6 +68,7 @@ try {
       id: 'mock-extension-id', getURL: value => origin + '/' + value, getManifest: () => ({ version }),
       async sendMessage(value) {
         mock.calls.push(copy(value));
+        if (value.type === 'context:toolbar-sites') return { ok: true, sites: [] };
         if (value.type === 'settings:get') return { ok: true, settings: copy(mock.settings), hasKey: mock.hasKey, permissions: [], cacheCount: 0 };
         if (value.type === 'connection:get') return connectionView();
         if (value.type === 'connection:save') {
@@ -114,6 +115,7 @@ try {
         return port;
       },
     };
+    globalThis.chrome.storage = { onChanged: { addListener() {} } };
     globalThis.chrome.permissions = {
       async request(value) { mock.permissions.push(copy(value)); return true; },
       onAdded: { addListener() {} }, onRemoved: { addListener() {} },
@@ -135,7 +137,7 @@ try {
     const saved = await page.evaluate(() => ({ config: __siwcUi.config, saves: __siwcUi.calls.filter(value => value.type === 'connection:save'), calls: __siwcUi.calls, permissions: __siwcUi.permissions, commands: __siwcUi.commands }));
     assert.deepEqual(saved.config, { provider: 'apiKey', model: '' });
     assert.deepEqual(saved.saves, [{ type: 'connection:save', config: { provider: 'apiKey', model: '' } }]);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
     assert.deepEqual(saved.commands, []);
     assert.equal(await page.locator('#connection-api').isChecked(), true);
@@ -171,7 +173,7 @@ try {
     assert.equal(await page.locator('#input-budget').inputValue(), '24000');
     assert.match(await page.locator('#key-status').innerText(), /已有本机 Key/);
     assert.equal(saved.hasKey, true);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 900 });
@@ -202,7 +204,7 @@ try {
       { type: 'connection:save', config: { provider: 'apiKey', model: '' } },
       { type: 'connection:save', config: { provider: 'apiKey', model: '' } },
     ]);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
   });
   await page.goto(origin + '/options.html');
@@ -224,7 +226,7 @@ try {
     await page.locator('#siwc-cancel').click();
     await page.waitForFunction(() => !__siwcUi.status.loginPending && !document.querySelector('#save-connection').disabled);
     assert.equal((await page.evaluate(() => __siwcUi.calls)).some(value => value.type === 'siwc:cancel'), true);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions[0]), { origins: ['https://auth.openai.com/*', 'https://api.openai.com/*', 'http://127.0.0.1/*'] });
+    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions), []);
   });
   await check('browser-only sign-in has no helper installer or extension registration controls', async () => {
     assert.equal(await page.locator('#siwc-extension-id, #siwc-copy-id, #siwc-helper-help').count(), 0);

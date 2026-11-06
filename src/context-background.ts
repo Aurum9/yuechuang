@@ -1,14 +1,16 @@
 import { allowedUrl } from './core';
 import { generateContextAnswer, planContextRequest, validateContextSnapshot } from './context-model';
 import {
-  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PORT, MAX_CONTEXT_SELECTION,
+  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PORT, HIDDEN_TOOLBAR_SITES, MAX_CONTEXT_SELECTION,
   detailsEligibility, normalizeContextSelection, type ContextAnswerKind, type ContextMode, type ContextShowMessage,
   type ContextSnapshot, type ContextState, type ContextSelectionStartMessage, type ContextSelectionDismissMessage
 } from './context-shared';
-import { readConfig } from './store';
+import { readConfig, secureStorage } from './store';
 import { savePhrase } from './phrases';
 import { getChatConnectionView } from './chat-connection';
 import { requestSiwc } from './siwc-background';
+import { WEB_ACCESS_ORIGINS } from './shared';
+import { trustedPage } from './trusted-page';
 
 interface ContextJob {
   id: string; tabId: number; frameId: number; documentId?: string; url?: string;
@@ -26,6 +28,32 @@ let beforeRequest: (() => void) | undefined;
 let configurationReady: (() => Promise<unknown>) | undefined;
 let onUnavailable: ((reason: string) => void) | undefined;
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重新选择后重试。';
+let toolbarSitesQueue: Promise<unknown> = Promise.resolve();
+
+async function hiddenToolbarSites(): Promise<string[]> {
+  await secureStorage;
+  const stored = (await chrome.storage.local.get(HIDDEN_TOOLBAR_SITES))[HIDDEN_TOOLBAR_SITES];
+  return Array.isArray(stored) ? stored.filter(site => typeof site === 'string') : [];
+}
+
+function setToolbarSiteHidden(hostname: string, hidden: boolean): Promise<void> {
+  const next = toolbarSitesQueue.then(async () => {
+    const sites = await hiddenToolbarSites();
+    if (sites.includes(hostname) === hidden) return;
+    const updated = hidden ? [...sites, hostname].sort() : sites.filter(site => site !== hostname);
+    await chrome.storage.local.set({ [HIDDEN_TOOLBAR_SITES]: updated });
+    const tabs = await chrome.tabs.query({}).catch(() => []);
+    for (const tab of tabs) {
+      if (tab.id !== undefined) void chrome.tabs.sendMessage(tab.id, { type: 'context:toolbar-site-changed', hostname }).catch(() => {});
+    }
+  });
+  toolbarSitesQueue = next.catch(() => {});
+  return next;
+}
+
+async function toolbarAllowed(url: string): Promise<boolean> {
+  return !(await hiddenToolbarSites()).includes(new URL(url).hostname);
+}
 
 function current(job: ContextJob) {
   if (jobs.get(job.tabId) !== job || job.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -52,7 +80,7 @@ async function verifyDocument(job: ContextJob) {
   const frame = await chrome.webNavigation.getFrame({ tabId: job.tabId, frameId: job.frameId });
   current(job);
   if (!frame || frame.documentId !== job.documentId || frame.url !== job.url || frame.errorOccurred) throw new Error('网页已导航，请在当前页面重新选择。');
-  if (!(await permitted(frame.url))) throw new Error('缺少当前网页的访问权限，请在阅窗设置中授权后重试。');
+  if (!(await permitted(frame.url))) throw new Error('缺少当前网页的访问权限，请在 Chrome 的扩展详情中检查网站访问权限后重试。');
   current(job);
   return frame;
 }
@@ -146,6 +174,7 @@ async function startFromSelection(input: ContextSelectionStartMessage, sender: c
   let job: ContextJob | undefined;
   try {
     const source = await authorizedSender(sender);
+    if (!await toolbarAllowed(source.url)) throw new Error('此网站的划词工具条已隐藏。');
     if (pendingSelections.get(tabId) !== pending) throw new DOMException('Aborted', 'AbortError');
     job = freshJob(source.tabId, source.frameId, input.mode);
     job.documentId = source.documentId; job.url = source.url; job.captureId = input.captureId;
@@ -190,7 +219,7 @@ async function run(job: ContextJob) {
     const config = await readConfig(); current(job);
     if (connection.provider === 'apiKey') {
       if (!config.settings.baseUrl || !config.settings.model || !config.key) throw new Error('请先在阅窗设置中填写接口、模型和 API Key。');
-      if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在阅窗设置中授权。');
+      if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在 Chrome 的扩展详情中检查网站访问权限。');
       current(job);
     }
     const plan = planContextRequest(config.settings, job.mode, job.snapshot, job.kind, job.coreText);
@@ -315,7 +344,7 @@ function removeMenu(id: string) {
 }
 function createMenu(id: string, title: string) {
   return new Promise<void>((resolve, reject) => {
-    chrome.contextMenus.create({ id, title, contexts: ['selection'], documentUrlPatterns: ['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*'] }, () => {
+    chrome.contextMenus.create({ id, title, contexts: ['selection'], documentUrlPatterns: [...WEB_ACCESS_ORIGINS] }, () => {
       const error = chrome.runtime.lastError; if (error) reject(new Error(error.message)); else resolve();
     });
   });
@@ -334,7 +363,19 @@ export function initializeContextMenus(options?: { beforeRequest?: () => void; c
     chrome.runtime.onConnect.addListener(bindPort);
     chrome.runtime.onMessage.addListener((input, sender, respond) => {
       if (input?.type === 'context:selection-eligible') {
-        void authorizedSender(sender).then(() => respond({ ok: true, enabled: true }), () => respond({ ok: true, enabled: false }));
+        void authorizedSender(sender).then(source => toolbarAllowed(source.url)).then(enabled => respond({ ok: true, enabled }), () => respond({ ok: true, enabled: false }));
+        return true;
+      }
+      if (input?.type === 'context:toolbar-hide-site') {
+        void authorizedSender(sender).then(source => setToolbarSiteHidden(new URL(source.url).hostname, true))
+          .then(() => respond({ ok: true }), error => respond({ ok: false, error: message(error) }));
+        return true;
+      }
+      if (input?.type === 'context:toolbar-sites' || input?.type === 'context:toolbar-restore-site') {
+        if (!trustedPage(sender, 'options.html')) { respond({ ok: false, error: '仅阅窗设置可以管理隐藏网站。' }); return; }
+        const update = input.type === 'context:toolbar-restore-site' && typeof input.hostname === 'string'
+          ? setToolbarSiteHidden(input.hostname, false) : Promise.resolve();
+        void update.then(hiddenToolbarSites).then(sites => respond({ ok: true, sites }), error => respond({ ok: false, error: message(error) }));
         return true;
       }
       if (input?.type === 'context:selection-start') {

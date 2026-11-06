@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { startFixtures } from './fixtures/server.mjs';
 import { hashDirectory, buildFingerprint } from '../scripts/artifact-hashes.mjs';
 
-// A real MV3 reload in a throwaway Chromium profile. Only the temporary copy's
-// permission bootstrap differs; production bytes are restored before checks.
+// A real MV3 reload in a throwaway Chromium profile using production bytes.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const directory = path.resolve(root, process.env.CONTENT_EXTENSION_DIST || 'dist');
 const files = await hashDirectory(directory);
 const productionManifest = await fs.readFile(path.join(directory, 'manifest.json'), 'utf8');
 const manifest = JSON.parse(productionManifest);
+const bootstrapLoopback = !manifest.host_permissions?.length;
 const expectFailure = process.env.CONTENT_EXPECT_INVALIDATED === '1';
 const baseline = process.env.CONTENT_EXTENSION_BASELINE === '1' || expectFailure;
 const output = path.join(root, 'test-results', 'content-extension-reload');
@@ -46,11 +46,17 @@ async function until(fn, message, timeout = 14000) {
 async function check(name, action) {
   await action(); report.checks.push({ name, result: 'pass' }); process.stdout.write(`PASS ${name}\n`);
 }
-async function liveWorker(previous) {
+async function liveWorker() {
   return until(async () => {
     for (const candidate of context.serviceWorkers()) {
-      if (candidate === previous || new URL(candidate.url()).hostname !== extensionId) continue;
-      try { if (await candidate.evaluate(version => chrome.runtime.getManifest().version === version && chrome.runtime.getManifest().host_permissions === undefined, manifest.version)) return candidate; } catch {}
+      if (new URL(candidate.url()).hostname !== extensionId) continue;
+      try {
+        const ready = await candidate.evaluate(({ version, hosts }) => {
+          const loaded = chrome.runtime.getManifest();
+          return loaded.version === version && JSON.stringify(loaded.host_permissions) === hosts && globalThis.__retiringReloadProbe === undefined;
+        }, { version: manifest.version, hosts: JSON.stringify(manifest.host_permissions) });
+        if (ready) return candidate;
+      } catch {}
     }
   }, 'reloaded production worker unavailable');
 }
@@ -79,7 +85,8 @@ async function selectToolbar(page) {
 }
 try {
   await fs.cp(directory, testExtension, { recursive: true });
-  await fs.writeFile(path.join(testExtension, 'manifest.json'), JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
+  const manifestPath = path.join(testExtension, 'manifest.json');
+  if (bootstrapLoopback) await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true, viewport: { width: 1100, height: 900 },
     args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'] });
   context.setDefaultTimeout(6500);
@@ -92,15 +99,16 @@ try {
   extensionId = new URL(worker.url()).hostname;
   const settings = await context.newPage(); await settings.goto('chrome://extensions');
   await settings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await fs.writeFile(path.join(testExtension, 'manifest.json'), productionManifest);
-  const oldBootstrap = worker;
-  await settings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await liveWorker(oldBootstrap);
+  if (bootstrapLoopback) {
+    await fs.writeFile(manifestPath, productionManifest);
+    await settings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
+    worker = await liveWorker();
+  }
   await settings.close();
   assert.deepEqual(await hashDirectory(testExtension), files);
   report.testedBuild.testCopyRestored = true;
   const granted = await worker.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*'] }));
-  assert.equal(granted, true, 'test-only loopback permission was not retained');
+  assert.equal(granted, true, 'loopback permission is unavailable');
   const toolbar = await sourcePage('toolbar');
   const answer = await sourcePage('context-port');
   await selectToolbar(answer);
@@ -121,9 +129,12 @@ try {
     assert.equal(fixtures.getStats().totalRequestsSinceStart, 0);
     assert.deepEqual(report.exceptions, []); assert.deepEqual(report.pageErrors, []);
   });
-  const retiring = worker;
-  await worker.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 0); }).catch(() => {});
-  worker = await liveWorker(retiring);
+  await worker.evaluate(() => {
+    // Chrome can reuse the DevTools target after the execution context is replaced.
+    globalThis.__retiringReloadProbe = true;
+    setTimeout(() => chrome.runtime.reload(), 0);
+  });
+  worker = await liveWorker();
   report.actualExtensionReloadVerified = true;
   await sleep(200);
   for (const { label, session, contexts } of sessions) {

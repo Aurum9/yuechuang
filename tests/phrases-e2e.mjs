@@ -9,7 +9,8 @@ import { hashDirectory, buildFingerprint } from '../scripts/artifact-hashes.mjs'
 // No source hooks, synthetic toolbar clicks, live API keys or real model calls.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'test-results');
-const screenshots = path.join(output, 'phrases-0.9.1');
+const { version } = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
+const screenshots = path.join(output, `phrases-${version}`);
 await fs.mkdir(screenshots, { recursive: true });
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
   for (const directory of ['.cache/ms-playwright', '.browsers']) {
@@ -35,7 +36,7 @@ const productionDirectory = path.join(root, 'dist');
 const testedFiles = await hashDirectory(productionDirectory);
 const productionManifest = await fs.readFile(path.join(productionDirectory, 'manifest.json'), 'utf8');
 const manifest = JSON.parse(productionManifest);
-assert.equal(manifest.version, '0.9.1', 'Build phrases 0.9.1 before running phrases e2e');
+assert.equal(manifest.version, version, 'Build the current extension before running phrases e2e');
 const report = {
   mockOnly: true, realModelVerified: false, extensionVersion: manifest.version,
   date: new Date().toISOString(), checks: [], network: [],
@@ -43,7 +44,7 @@ const report = {
   testHarness: {
     productionWorkerWithoutTestEntry: true, trustedMouseSelectionAndButtonClicks: true,
     productionSourceModified: false, testCopyRestored: false,
-    permissionBootstrap: 'First launch grants loopback through a temporary test-copy manifest; exact production manifest is restored and the extension reloaded before feature checks.'
+    permissionBootstrap: 'The fresh profile loads a byte-identical copy of the production manifest with website access.',
   },
   notes: [
     'Every phrase is saved through a real toolbar/result-card button after a deterministic local mock SSE response. No test hook is inserted into the production worker.',
@@ -55,7 +56,7 @@ const report = {
 };
 const fixtures = await startFixtures({ port: Number(process.env.PHRASES_FIXTURE_PORT || 4337) });
 report.fixtureOrigin = fixtures.origin;
-const profile = await fs.mkdtemp(path.join(output, 'phrases-0.9.1-profile-'));
+const profile = await fs.mkdtemp(path.join(output, `phrases-${version}-profile-`));
 assertTestDirectory(profile);
 const testExtension = path.join(profile, 'test-extension');
 assertTestDirectory(testExtension);
@@ -199,11 +200,13 @@ async function deleteFirst({ cancel = false } = {}) {
 }
 
 try {
-  // First prove that management is useful without any website/model permission.
-  await launch(productionDirectory); await openOptions(); await openLibrary();
-  await check('empty collection opens with no model Key, no website grants and zero API requests', async () => {
+  // First prove that management is useful without model configuration.
+  await fs.cp(productionDirectory, testExtension, { recursive: true });
+  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
+  await launch(testExtension); await openOptions(); await openLibrary();
+  await check('empty collection opens with no model Key and zero API requests', async () => {
     const configuration = await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }));
-    assert.equal(configuration.hasKey, false); assert.deepEqual(configuration.permissions, []);
+    assert.equal(configuration.hasKey, false);
     assert.equal((await entries()).length, 0); assert.equal(await cards().count(), 0);
     assert.equal(await library.locator('#empty-state').isVisible(), true);
     assert.match(await library.locator('#empty-title').innerText(), /还没有/);
@@ -212,25 +215,6 @@ try {
     assert.equal(total(), 0);
     await library.screenshot({ path: path.join(screenshots, 'empty-desktop.png'), fullPage: true });
   });
-  await context.close();
-  await fs.cp(productionDirectory, testExtension, { recursive: true });
-  const manifestPath = path.join(testExtension, 'manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
-  await launch(testExtension);
-  // Reload exact production bytes, preserving only the loopback host grants.
-  await fs.writeFile(manifestPath, productionManifest);
-  const browserSettings = await context.newPage(); await browserSettings.goto('chrome://extensions');
-  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await browserSettings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await until(async () => {
-    for (const candidate of context.serviceWorkers()) {
-      try {
-        if (new URL(candidate.url()).hostname === extensionId && await candidate.evaluate(() => chrome.runtime.getManifest().version === '0.9.1' && chrome.runtime.getManifest().host_permissions === undefined)) return candidate;
-      } catch {}
-    }
-  }, 'restored production worker unavailable');
-  await browserSettings.close();
-  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
   await openOptions(); assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*', 'http://localhost/*'] })), true);
   await settings('normal', fakeKey); await openLibrary(); source = await context.newPage(); await gotoSource(true); report.extensionId = extensionId;
 
@@ -429,7 +413,10 @@ try {
     return { sameProfile: true, phraseCount: saved.length, sessionKeyCleared: true };
   });
   await check('collection remains readable, searchable and exportable after all website/API grants are removed', async () => {
-    const before = total(); await options.evaluate(() => chrome.permissions.remove({ origins: ['http://127.0.0.1/*', 'http://localhost/*'] }));
+    const before = total();
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    await manager.evaluate(extensionId => chrome.developerPrivate.updateExtensionConfiguration({ extensionId, hostAccess: 'ON_CLICK' }), extensionId);
+    await manager.close();
     const configuration = await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' })); assert.equal(configuration.hasKey, false); assert.deepEqual(configuration.permissions, []);
     await refreshLibrary(1); const saved = await entries(); assert.equal(saved.length, 1);
     await library.locator('#search').fill(saved[0].text); assert.equal(await cards().count(), 1);
@@ -479,9 +466,9 @@ finally {
     managementWithoutModelOrWebsitePermission: passed('empty collection opens') && passed('collection remains readable'),
     productionBytesUnchanged: passed('all network traffic is loopback') && report.testedBuild.unchangedAfterTest
   };
-  report.screenshots = (await fs.readdir(screenshots)).filter(name => name.endsWith('.png')).map(name => `test-results/phrases-0.9.1/${name}`);
-  await fs.writeFile(path.join(output, 'phrases-e2e-report-0.9.1.json'), JSON.stringify(report, null, 2) + '\n');
+  report.screenshots = (await fs.readdir(screenshots)).filter(name => name.endsWith('.png')).map(name => `test-results/phrases-${version}/${name}`);
+  await fs.writeFile(path.join(output, `phrases-e2e-report-${version}.json`), JSON.stringify(report, null, 2) + '\n');
   assertTestDirectory(profile); await fs.rm(profile, { recursive: true, force: true });
-  process.stdout.write(`Mock phrases 0.9.1 e2e: ${report.passed} passed, ${report.failed} failed. Real model answer quality remains unverified.\n`);
+  process.stdout.write(`Mock phrases ${version} e2e: ${report.passed} passed, ${report.failed} failed. Real model answer quality remains unverified.\n`);
   if (fatal || report.failed) process.exitCode = 1;
 }

@@ -18,7 +18,6 @@ const { chromium } = await import('playwright');
 const manifestText = await fs.readFile(path.join(dist, 'manifest.json'), 'utf8'), manifest = JSON.parse(manifestText);
 const files = await hashDirectory(dist);
 const profile = await fs.mkdtemp(path.join(output, 'isolated-profile-')), extension = path.join(profile, 'extension');
-const origins = ['https://auth.openai.com/*', 'https://api.openai.com/*', 'http://127.0.0.1/*'];
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), alg: 'RS256', kid: 'e2e-synthetic', use: 'sig' };
 const report = { version: manifest.version, mockOnly: true, realAccountVerified: false, realModelVerified: false, checks: [], unexpectedNetwork: [], actualWorkerStopVerified: false,
@@ -93,9 +92,6 @@ async function approve(page) {
 }
 try {
   await fs.cp(dist, extension, { recursive: true });
-  // Bootstrap optional host permissions in an isolated install, then restore the
-  // exact production manifest before loading the UI or performing any login.
-  await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify({ ...manifest, host_permissions: [...origins, 'https://fixture.example/*'] }));
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true, viewport: { width: 900, height: 900 },
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--no-first-run', '--no-proxy-server', '--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND'] });
   context.setDefaultTimeout(8000);
@@ -112,11 +108,6 @@ try {
     report.unexpectedNetwork.push({ origin: url.origin, path: url.pathname }); return route.abort();
   });
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
-  await fs.writeFile(path.join(extension, 'manifest.json'), manifestText);
-  const manager = await context.newPage(); await manager.goto('chrome://extensions');
-  await manager.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  const prior = worker; await manager.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await currentWorker(prior); await manager.close();
   assert.deepEqual(await hashDirectory(extension), files); report.testedBuild.testCopyRestored = true;
   await installFixture(worker);
   settings = await context.newPage(); await settings.goto(`chrome-extension://${extensionId}/options.html`);

@@ -1,6 +1,7 @@
 /** Shared by the background worker and the UI inside the selected document. */
 export const CONTEXT_MENU_EXPLAIN = 'contextual-explain';
 export const CONTEXT_MENU_TRANSLATE = 'contextual-translate';
+export const HIDDEN_TOOLBAR_SITES = 'hiddenToolbarSites';
 export const CONTEXT_PORT = 'context-reading';
 export const MAX_CONTEXT_SELECTION = 6_000;
 export const MAX_CONTEXT_PARAGRAPHS = 10_000;

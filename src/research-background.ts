@@ -166,7 +166,7 @@ async function start(question: unknown, urls: unknown, sender: chrome.runtime.Me
   await configurationReady();
   const { settings, key } = await readConfig();
   if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置页配置接口、模型和 API Key。');
-  for (const url of [...input.urls, settings.baseUrl]) if (!(await permitted(url))) throw new Error('有文档或模型接口域尚未授权，请先授权再开始。');
+  for (const url of [...input.urls, settings.baseUrl]) if (!(await permitted(url))) throw new Error('缺少文档或模型接口域权限，请在 Chrome 的扩展详情中检查网站访问权限。');
   if (closedOwners.has(document)) throw new Error('研究页已关闭，本次未开始。');
   if (version !== epoch) throw new Error('配置或权限已变化，请重新开始研究。');
   if (researchActive(latest)) throw new Error('已有研究正在进行。');

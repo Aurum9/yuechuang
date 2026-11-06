@@ -17,7 +17,7 @@
         <p class="eyebrow">阅窗 · 阅读与收藏</p>
         <h1 id="page-title">给阅读留一点余地。</h1>
         <p class="intro-description">拖动链接，在原页的预览窗里读目标网页；需要时，再读一段中文摘要。</p>
-        <ol class="quick-start" aria-label="开始使用的三个步骤"><li><span>1</span>选择模型连接</li><li><span>2</span>授权阅读网站</li><li><span>3</span>划词查阅或拖动链接</li></ol>
+        <ol class="quick-start" aria-label="开始使用"><li><span>1</span>选择模型连接</li><li><span>2</span>划词查阅或拖动链接</li></ol>
       </section>
 
       <div id="feedback" class="feedback" role="status" aria-live="polite" hidden></div>
@@ -59,20 +59,14 @@
               <label class="check-row" for="auto-long-summary"><input id="auto-long-summary" name="autoLongSummary" type="checkbox" /><span><strong>允许自动摘要对长文发起多次模型请求</strong><small>默认关闭。超预算文章会按原文顺序分段，再逐层整合；开始前显示预计调用次数。开启后，自动摘要也可执行整组调用，可能增加费用；可随时停止，已产生的调用仍可能计费。</small></span></label>
               <p class="field-help summary-scope">摘要覆盖当前已加载、可访问并成功提取的可见正文。付费预览或分页会注明范围；达到 300,000 字符资源上限时停止并提示，不自动抓取隐藏内容。</p>
               <div class="form-actions"><button type="submit" class="button button-primary" id="save-settings">保存配置 <span aria-hidden="true">↗</span></button><button type="button" class="button button-secondary" id="test-connection">保存并测试连接</button><span id="save-state" class="save-state" aria-live="polite"></span></div>
-              <p class="action-help">测试连接会发送一次简短模型请求，可能产生接口费用；先授权接口所在域。</p>
+              <p class="action-help">测试连接会发送一次简短模型请求，可能产生接口费用。</p>
             </form>
             <div id="test-result" class="test-result" hidden><span class="result-label">接口返回</span><p id="test-text"></p></div>
           </section>
 
-          <section class="card" aria-labelledby="permission-heading">
-            <div class="section-heading"><span class="step-number">02</span><div><h2 id="permission-heading">选择可访问的网站</h2><p>来源页、目标页和模型接口都需要对应的域权限。</p></div></div>
-            <div class="permission-summary"><span id="permission-dot" class="permission-dot" aria-hidden="true"></span><p id="permission-status">正在检查授权…</p></div>
-            <div class="permission-actions"><button type="button" class="button button-primary" id="grant-https">启用 HTTPS 网页访问</button><button type="button" class="button button-secondary" id="grant-local">授权本机 HTTP</button></div>
-            <p class="field-help permission-help">HTTPS 授权适用于所有 HTTPS 网站。你也可以只授权下方指定的网站；本机 HTTP 仅覆盖 localhost 与 127.0.0.1。</p>
-            <div class="domain-grant"><label for="permission-origin">按域授权</label><div class="input-action"><input id="permission-origin" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com" /><button class="button button-secondary" type="button" id="grant-origin">授权这个域</button></div><p class="field-help">输入网站或 API 地址，只申请该域的全部路径。来源页与目标页跨域时，请分别授权。</p></div>
-            <div class="permission-list-header"><h3>当前授权</h3><span id="permission-count" class="count-badge">0 条</span></div>
-            <ul id="permission-list" class="permission-list" aria-label="已授权的网站"></ul>
-            <p class="field-help">撤销权限会停止相关摘要任务。授权变更后，若已打开的网页没有预览投放区，请刷新网页。</p>
+          <section class="card" id="website-access" aria-labelledby="hidden-sites-heading">
+            <div class="section-heading"><span class="step-number">02</span><div><h2 id="hidden-sites-heading">已隐藏划词工具条的网站</h2><p>在划词工具条的「×」里选择永久隐藏后，可在这里恢复。</p></div></div>
+            <ul id="hidden-toolbar-sites" class="permission-list" aria-labelledby="hidden-sites-heading"></ul>
           </section>
         </div>
 
