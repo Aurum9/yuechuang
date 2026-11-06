@@ -237,8 +237,9 @@ try {
   });
   await check('result controls ignore synthetic page clicks', async () => {
     const before = count(), oldId = await panel(source).getAttribute('data-request-id');
-    for (const name of ['retry', 'expand', 'stop', 'close']) await action(source, name).evaluate(node => node.click());
+    for (const name of ['retry', 'expand', 'stop', 'pin', 'close']) await action(source, name).evaluate(node => node.click());
     await sleep(180); assert.equal(count(), before); assert.equal(await panel(source).getAttribute('data-request-id'), oldId); assert.equal(await status(source).getAttribute('data-phase'), 'done');
+    assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
   });
   await check('long paragraph translation sends the complete selection and hides unrelated example action', async () => {
     await gotoContext(true); fixtures.reset(); const text = await selectToolbar(source, '#ctx-long-foreign', { paragraph: true }); assert.ok(text.length > 240);
@@ -293,10 +294,71 @@ try {
       assert.equal(await toolbar(source).count(), 0, selector); assert.equal(await host(source).count(), 0, selector); assert.equal(count(), 0, selector);
     }
   });
-  await check('selecting the answer itself never opens another toolbar or pays again', async () => {
+  await check('selecting and copying part of the answer keeps it open without another request', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await completed(source);
-    const box = await core(source).boundingBox(); await source.mouse.dblclick(box.x + 35, box.y + 12); await sleep(180); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
-    await closeAnswer(source);
+    await source.addStyleTag({ content: 'html, body { user-select: none; }' });
+    const box = await core(source).boundingBox();
+    await source.mouse.dblclick(box.x + 80, box.y + 12);
+    const excerpt = await selected(source);
+    assert.ok(excerpt.trim() && (await core(source).innerText()).includes(excerpt) && excerpt !== await core(source).innerText());
+    await source.keyboard.press('ControlOrMeta+c');
+    assert.equal(await source.evaluate(() => navigator.clipboard.readText()), excerpt);
+    await source.evaluate(() => navigator.clipboard.writeText(''));
+    await action(source, 'copy').click();
+    await until(async () => await source.evaluate(() => navigator.clipboard.readText()) === excerpt, 'copy did not use the selected excerpt');
+    assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
+    await core(source).click();
+    assert.equal(await panel(source).isVisible(), true);
+    await source.keyboard.press('Escape'); await host(source).waitFor({ state: 'detached' });
+  });
+  await check('pinned answer survives outside clicks and reopens at the saved position and size until unpinned', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-b', 'translate'); await completed(source);
+    const bounds = () => panel(source).boundingBox();
+    const drag = async (x, y, dx, dy) => {
+      await source.mouse.move(x, y); await source.mouse.down();
+      await source.mouse.move(x + dx, y + dy, { steps: 8 }); await source.mouse.up();
+    };
+    const initial = await bounds();
+    await drag(initial.x + 80, initial.y + 20, 120, -90);
+    const moved = await bounds();
+    assert.deepEqual(moved, { ...initial, x: initial.x + 120, y: initial.y - 90 });
+    assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
+    await drag(moved.x + moved.width - 8, moved.y + moved.height - 8, 65, 40);
+    const resized = await bounds();
+    assert.deepEqual(resized, { ...moved, width: moved.width + 65, height: moved.height + 40 });
+    const footer = await panel(source).locator('.foot').boundingBox();
+    assert.ok(Math.abs(resized.y + resized.height - footer.y - footer.height) <= 1, 'button bar must stay at the bottom of the resized panel');
+    await action(source, 'pin').click();
+    try {
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await bounds(), resized);
+      await drag(resized.x + 80, resized.y + 20, 25, 15);
+      const pinnedMoved = await bounds();
+      assert.deepEqual(pinnedMoved, { ...resized, x: resized.x + 25, y: resized.y + 15 });
+      await drag(pinnedMoved.x + 2, pinnedMoved.y + 65, -30, 0);
+      const pinnedAt = await bounds();
+      assert.deepEqual(pinnedAt, { ...pinnedMoved, x: pinnedMoved.x - 30, width: pinnedMoved.width + 30 });
+      await source.mouse.click(1240, 50);
+      await selectToolbar(source, '#term-a');
+      assert.deepEqual(await bounds(), pinnedAt);
+      await clickToolbar(source, 'translate'); await completed(source);
+      assert.deepEqual(await bounds(), pinnedAt);
+      await source.keyboard.press('Escape'); await host(source).waitFor({ state: 'detached' });
+      await gotoContext(); await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await bounds(), pinnedAt);
+      await source.mouse.click(1240, 50);
+      await expand(source);
+      assert.deepEqual(await bounds(), pinnedAt);
+      await closeAnswer(source);
+      await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      await action(source, 'pin').click();
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
+      await source.mouse.click(1240, 50); await host(source).waitFor({ state: 'detached' });
+      await until(() => options.evaluate(async () => !(await chrome.storage.local.get('contextPanelPin')).contextPanelPin), 'unpin was not persisted');
+    } finally {
+      await options.evaluate(() => chrome.storage.local.remove('contextPanelPin'));
+    }
   });
   await check('dragging a link never triggers a selection toolbar or model request', async () => {
     await gotoContext(); fixtures.reset(); const link = source.locator('#ctx-drag-link'); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox();
@@ -438,7 +500,7 @@ finally {
     bilingualPairs: passed('short-English expansion has 1–2 actual English/Chinese pairs') && passed('actual preview iframe toolbar translates'),
     usageExamples: passed('technical explanation retains nearby'),
     longTranslationNoExamples: passed('long paragraph translation sends the complete selection'),
-    selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting the answer itself', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
+    selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting and copying part of the answer', 'pinned answer survives outside clicks', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
     m1DragSmoke: passed('M1 drag-hover smoke')
   };
   await fs.writeFile(path.join(output, 'context-e2e-report-' + version + '.json'), JSON.stringify(report, null, 2) + '\n');

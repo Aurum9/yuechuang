@@ -2,6 +2,7 @@
 export const CONTEXT_MENU_EXPLAIN = 'contextual-explain';
 export const CONTEXT_MENU_TRANSLATE = 'contextual-translate';
 export const HIDDEN_TOOLBAR_SITES = 'hiddenToolbarSites';
+export const CONTEXT_PANEL_PIN = 'contextPanelPin';
 export const CONTEXT_PORT = 'context-reading';
 export const MAX_CONTEXT_SELECTION = 6_000;
 export const MAX_CONTEXT_PARAGRAPHS = 10_000;
@@ -25,6 +26,7 @@ export function detailsEligibility(mode: ContextMode, text: string): ContextExam
   return englishWord && letters > 0 && latin / letters >= .65 && words.length <= 40 ? 'bilingual' : undefined;
 }
 export interface ContextRect { x: number; y: number; width: number; height: number }
+export interface ContextPanelPin { left: number; top: number; width?: number; height?: number }
 export interface ContextSnapshot {
   text: string;
   context: string;
@@ -58,6 +60,7 @@ export type ContextCaptureResult = { ok: true; snapshot: ContextSnapshot } | { o
 export interface ContextShowMessage {
   type: 'context:show';
   requestId: string;
+  replacesRequestId?: string;
   mode: ContextMode;
   /** Capture failures still display an error in the same document; they never call the model. */
   snapshot?: ContextSnapshot;
@@ -65,6 +68,7 @@ export interface ContextShowMessage {
   error?: string;
   expanded: boolean;
   captureId?: string;
+  pin?: ContextPanelPin;
   coreText?: string;
   detailsText?: string;
   exampleKind?: ContextExampleKind;

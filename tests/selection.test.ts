@@ -243,15 +243,18 @@ test('trusted selection creates a compact toolbar and a single click opens a non
   assert.equal(await page.evaluate(() => (window as any).__contextFixture.escapedParent), 0, 'Escape must stay within the nearby answer');
 });
 
-test('new or cleared selection invalidates nonce, cancels the old UI and does not auto-submit', async () => {
+test('programmatic selection changes invalidate the nonce without closing the answer or submitting', async () => {
   await installUiFixture(); const toolbar = page.locator('local-reader-selection-toolbar'); const host = page.locator('local-reader-context');
   await page.locator('#term').dblclick(); await toolbar.locator('.toolbar').waitFor({ state: 'visible' }); const oldCapture = await toolbar.getAttribute('data-capture-id');
   await toolbar.locator('[data-selection-action="explain"]').click(); await host.waitFor({ state: 'visible' }); await page.evaluate(() => (window as any).__contextFixture.emit('缓存一致性表示各读取者对数据版本达成一致。'));
   assert.equal(await host.locator('[data-context-action="expand"]').innerText(), '用法示例');
   await page.evaluate(() => { const node = document.querySelector('#other-term')!.firstChild!; const range = document.createRange(); range.selectNodeContents(node); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range); });
-  await host.waitFor({ state: 'detached' }); assert.equal(await toolbar.count(), 0, 'a script selection change can clear UI but cannot create another toolbar');
-  const stale = await page.evaluate(captureId => (window as any).__contextFixture.notify({ type: 'context:capture', requestId: 'stale', captureId }), oldCapture); assert.equal(stale.ok, false);
+  await page.waitForFunction(captureId => !(window as any).__contextFixture.notify({ type: 'context:capture', requestId: 'stale', captureId }).ok, oldCapture);
+  assert.equal(await host.count(), 1);
+  assert.equal(await toolbar.count(), 0, 'a script selection change cannot create another toolbar');
   assert.equal(await page.evaluate(() => (window as any).__contextFixture.messages.filter((message: any) => message.type === 'context:selection-start').length), 1);
+  await page.mouse.click(3, 3);
+  await host.waitFor({ state: 'detached' });
   await page.locator('#other-term').dblclick(); await toolbar.locator('.toolbar').waitFor({ state: 'visible' }); assert.notEqual(await toolbar.getAttribute('data-capture-id'), oldCapture);
   await page.evaluate(() => scrollBy(0, 35)); await toolbar.waitFor({ state: 'detached' });
   await page.locator('#editor').dblclick(); await page.waitForTimeout(25); assert.equal(await toolbar.count(), 0);

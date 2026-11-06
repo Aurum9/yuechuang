@@ -1,4 +1,4 @@
-import { CONTEXT_PORT, MAX_CONTEXT_PARAGRAPHS, MAX_CONTEXT_SELECTION, MAX_CONTEXT_TITLE, normalizeContextSelection, type ContextCaptureMessage, type ContextCaptureResult, type ContextCommand, type ContextMode, type ContextRect, type ContextShowMessage, type ContextSnapshot, type ContextState } from './context-shared';
+import { CONTEXT_PORT, MAX_CONTEXT_PARAGRAPHS, MAX_CONTEXT_SELECTION, MAX_CONTEXT_TITLE, normalizeContextSelection, type ContextCaptureMessage, type ContextCaptureResult, type ContextCommand, type ContextMode, type ContextPanelPin, type ContextRect, type ContextShowMessage, type ContextSnapshot, type ContextState } from './context-shared';
 import { createContextPanel } from './context-ui';
 import { createSelectionToolbar } from './selection-toolbar';
 import { consumeRuntimeLastError, isBackgroundSender, notifyBackground } from './content-runtime';
@@ -33,6 +33,7 @@ export function bootContextReading(): void {
   let toolbar: ReturnType<typeof createSelectionToolbar> | undefined;
   let menuRect: ContextRect = { x: 20, y: 20, width: 0, height: 0 };
   let panel: ReturnType<typeof createContextPanel> | undefined;
+  let panelPin: ContextPanelPin | undefined;
   let port: chrome.runtime.Port | undefined;
   let currentId = '';
   let generation = 0;
@@ -56,12 +57,26 @@ export function bootContextReading(): void {
     panel?.remove(); panel = undefined;
   }
   function removeToolbar(): void { toolbar?.remove(); toolbar = undefined; }
+  function dismissSelection(): void {
+    const captureId = selected?.id;
+    ++gestureVersion; selected = undefined; trackedSelection = undefined; lastCapture = undefined;
+    removeToolbar();
+    if (captureId && (!currentId || captureId !== shownCaptureId)) notifyBackground({ type: 'context:selection-dismiss', captureId });
+  }
   function dismissAll(): void {
     const requestId = currentId;
-    const captureId = requestId ? shownCaptureId : selected?.id;
-    ++gestureVersion; selected = undefined; trackedSelection = undefined; lastCapture = undefined; shownCaptureId = undefined;
-    removeToolbar(); clearLocal();
-    if (requestId || captureId) notifyBackground({ type: 'context:selection-dismiss', requestId: requestId || undefined, captureId });
+    const captureId = shownCaptureId;
+    dismissSelection(); clearLocal(); shownCaptureId = undefined;
+    if (requestId) notifyBackground({ type: 'context:selection-dismiss', requestId, captureId });
+  }
+  function invalidateSelection(): void {
+    if (panel) dismissSelection();
+    else dismissAll();
+  }
+  async function savePin(pin: ContextPanelPin | null): Promise<boolean> {
+    panelPin = pin ?? undefined;
+    try { return !!(await chrome.runtime.sendMessage({ type: 'context:panel-pin', pin }))?.ok; }
+    catch { return false; }
   }
   function refreshEligibility(): Promise<void> {
     const version = ++eligibilityVersion;
@@ -83,14 +98,17 @@ export function bootContextReading(): void {
     if (location.href === knownUrl) return;
     knownUrl = location.href; enabled = false; pointerSelecting = false; dismissAll(); void refreshEligibility();
   }
-  function isReaderEvent(event: Event): boolean { return event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-local-reader-root')); }
+  function isReaderEvent(event: Event, root?: string): boolean {
+    return event.composedPath().some(node => node instanceof Element &&
+      (root ? node.getAttribute('data-local-reader-root') === root : node.hasAttribute('data-local-reader-root')));
+  }
   async function finishSelection(point?: { x: number; y: number }): Promise<void> {
     navigation();
     if (toolbarHiddenForDocument || dragging || Date.now() < suppressUntil) return;
     const version = ++gestureVersion;
     const result = captureContextSelection(document, Date.now(), point);
     const identity = selectionIdentity(document);
-    if (!result.ok || !identity) { dismissAll(); return; }
+    if (!result.ok || !identity) { invalidateSelection(); return; }
     try { if (eligibilityPending) await eligibilityPending; }
     catch { return; }
     if (!enabled || version !== gestureVersion || !sameSelection(identity, document) || location.href !== result.snapshot.url) return;
@@ -113,7 +131,7 @@ export function bootContextReading(): void {
   }
   async function startSelection(mode: ContextMode): Promise<void> {
     const capture = selected;
-    if (!capture || !enabled || !sameSelection(capture.identity, document) || capture.snapshot.url !== location.href) { dismissAll(); return; }
+    if (!capture || !enabled || !sameSelection(capture.identity, document) || capture.snapshot.url !== location.href) { invalidateSelection(); return; }
     removeToolbar();
     try {
       const result = await chrome.runtime.sendMessage({ type: 'context:selection-start', mode, captureId: capture.id }) as { ok?: boolean; error?: string; message?: string };
@@ -125,19 +143,21 @@ export function bootContextReading(): void {
   }
   function localFailure(mode: ContextMode, snapshot: ContextSnapshot, error: string): void {
     clearLocal();
-    panel = createContextPanel({ type: 'context:show', requestId: `local-${selected?.id ?? ''}`, mode, snapshot, error, expanded: false }, menuRect, { command: type => {
+    panel = createContextPanel({ type: 'context:show', requestId: `local-${selected?.id ?? ''}`, mode, snapshot, error, expanded: false, pin: panelPin }, menuRect, { savePin, command: type => {
       if (type === 'context:close') dismissAll();
       else if (type === 'context:retry') { panel?.remove(); panel = undefined; void startSelection(mode); }
     } });
   }
   document.addEventListener('pointerdown', event => {
-    if (!event.isTrusted || event.button !== 0 || isReaderEvent(event)) return;
-    pointerSelecting = true; dismissAll();
+    if (!event.isTrusted || panel?.contains(event) || isReaderEvent(event, 'selection-toolbar')) return;
+    if (panel && !panel.isPinned()) dismissAll();
+    if (event.button !== 0 || isReaderEvent(event)) return;
+    pointerSelecting = true; invalidateSelection();
   }, true);
   document.addEventListener('pointerup', event => {
-    if (!event.isTrusted || event.button !== 0 || !pointerSelecting || isReaderEvent(event)) return;
+    if (!event.isTrusted || event.button !== 0 || !pointerSelecting) return;
     pointerSelecting = false;
-    if (dragging || Date.now() < suppressUntil) return;
+    if (isReaderEvent(event) || dragging || Date.now() < suppressUntil) return;
     const version = gestureVersion;
     setTimeout(() => { if (version === gestureVersion) void finishSelection({ x: event.clientX, y: event.clientY }); }, 0);
   }, true);
@@ -147,7 +167,7 @@ export function bootContextReading(): void {
   }, true);
   document.addEventListener('keydown', event => {
     if (!event.isTrusted || isReaderEvent(event)) return;
-    if (event.key === 'Shift' || (event.shiftKey && /^(Arrow|Home|End|Page)/u.test(event.key)) || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a')) dismissAll();
+    if (event.key === 'Shift' || (event.shiftKey && /^(Arrow|Home|End|Page)/u.test(event.key)) || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a')) invalidateSelection();
   }, true);
   document.addEventListener('selectionchange', () => {
     // Programmatic selection changes can invalidate an old gesture. They never
@@ -155,18 +175,18 @@ export function bootContextReading(): void {
     if (!trackedSelection || selectionInsideReader(document)) return;
     if (!sameSelection(trackedSelection, document)) {
       // The browser-owned native menu may collapse its DOM selection while its
-      // OnClickData still carries the selected text. Keep only that trusted
-      // menu snapshot; toolbar nonces and any running answer are invalidated.
+      // OnClickData still carries the selected text. Keep that trusted
+      // menu snapshot while invalidating the old toolbar gesture.
       const nativeCapture = lastCapture;
       const keepNative = nativeCapture && nativeCapture.url === location.href && Date.now() >= nativeCapture.capturedAt && Date.now() - nativeCapture.capturedAt <= SNAPSHOT_LIFETIME;
-      dismissAll();
+      invalidateSelection();
       if (keepNative) lastCapture = nativeCapture;
     }
   });
-  document.addEventListener('dragstart', event => { if (event.isTrusted) { dragging = true; pointerSelecting = false; dismissAll(); } }, true);
+  document.addEventListener('dragstart', event => { if (event.isTrusted && !isReaderEvent(event)) { dragging = true; pointerSelecting = false; invalidateSelection(); } }, true);
   document.addEventListener('dragend', event => { if (event.isTrusted) { dragging = false; pointerSelecting = false; suppressUntil = Date.now() + 350; } }, true);
   document.addEventListener('pointercancel', () => { pointerSelecting = false; });
-  const scroll = (event: Event) => { if (!isReaderEvent(event)) dismissAll(); };
+  const scroll = (event: Event) => { if (!isReaderEvent(event)) invalidateSelection(); };
   document.addEventListener('scroll', scroll, true);
   window.visualViewport?.addEventListener('scroll', scroll);
   document.addEventListener('contextmenu', event => {
@@ -195,11 +215,17 @@ export function bootContextReading(): void {
     navigation();
     if (typeof message.requestId !== 'string' || !message.requestId || message.requestId.length > 200 || !['explain', 'translate'].includes(message.mode)) return { ok: false, error: '回答请求无效。' };
     if (message.snapshot && message.snapshot.url !== location.href) return { ok: false, error: '页面已变化，请重新选择文字。' };
-    if (message.captureId && message.captureId !== selected?.id) return { ok: false, error: '选区已变化，请重新选择文字。' };
-    if (!message.captureId && !lastCapture) return { ok: false, error: '该右键选区已失效，请重新选择文字。' };
+    if (message.replacesRequestId) {
+      if (currentId !== message.replacesRequestId && currentId !== message.requestId) return { ok: false, error: '上次回答已关闭。' };
+    } else {
+      if (message.captureId && message.captureId !== selected?.id) return { ok: false, error: '选区已变化，请重新选择文字。' };
+      if (!message.captureId && !lastCapture) return { ok: false, error: '该右键选区已失效，请重新选择文字。' };
+    }
+    const previousLayout = message.replacesRequestId ? panel?.layout() : undefined;
     removeToolbar(); clearLocal(); currentId = message.requestId; shownCaptureId = message.captureId;
     const version = generation;
-    panel = createContextPanel(message, menuRect, { command });
+    panelPin = message.pin;
+    panel = createContextPanel(message, menuRect, { command, savePin }, previousLayout ?? message.pin);
     let next: chrome.runtime.Port;
     try { next = chrome.runtime.connect({ name: CONTEXT_PORT }); }
     catch { panel.interrupted(); return { ok: false, error: '扩展连接已失效，请刷新页面。' }; }

@@ -1,9 +1,9 @@
 import { allowedUrl } from './core';
 import { generateContextAnswer, planContextRequest, validateContextSnapshot } from './context-model';
 import {
-  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PORT, HIDDEN_TOOLBAR_SITES, MAX_CONTEXT_SELECTION,
+  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PANEL_PIN, CONTEXT_PORT, HIDDEN_TOOLBAR_SITES, MAX_CONTEXT_SELECTION,
   detailsEligibility, normalizeContextSelection, type ContextAnswerKind, type ContextMode, type ContextShowMessage,
-  type ContextSnapshot, type ContextState, type ContextSelectionStartMessage, type ContextSelectionDismissMessage
+  type ContextPanelPin, type ContextSnapshot, type ContextState, type ContextSelectionStartMessage, type ContextSelectionDismissMessage
 } from './context-shared';
 import { readConfig, secureStorage } from './store';
 import { savePhrase } from './phrases';
@@ -16,6 +16,7 @@ interface ContextJob {
   id: string; tabId: number; frameId: number; documentId?: string; url?: string;
   mode: ContextMode; kind: ContextAnswerKind; snapshot?: ContextSnapshot; coreText: string;
   captureId?: string;
+  replacesRequestId?: string;
   controller: AbortController; state: ContextState; shown: boolean; started: boolean;
   port?: chrome.runtime.Port;
 }
@@ -29,6 +30,16 @@ let configurationReady: (() => Promise<unknown>) | undefined;
 let onUnavailable: ((reason: string) => void) | undefined;
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重新选择后重试。';
 let toolbarSitesQueue: Promise<unknown> = Promise.resolve();
+let panelPinQueue: Promise<unknown> = Promise.resolve();
+
+function validPanelPin(pin: unknown): pin is ContextPanelPin {
+  if (!pin || typeof pin !== 'object' || !('left' in pin) || !('top' in pin)) return false;
+  return [pin.left, pin.top].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0) &&
+    ['width', 'height'].every(key => {
+      const value = (pin as Record<string, unknown>)[key];
+      return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value > 0);
+    });
+}
 
 async function hiddenToolbarSites(): Promise<string[]> {
   await secureStorage;
@@ -103,11 +114,14 @@ function replace(job: ContextJob) {
   jobs.set(job.tabId, job);
 }
 async function show(job: ContextJob, error?: string) {
+  await panelPinQueue;
+  const pin = (await chrome.storage.local.get(CONTEXT_PANEL_PIN).catch(() => ({} as Record<string, unknown>)))[CONTEXT_PANEL_PIN];
   await verifyDocument(job); current(job);
   const result = await chrome.tabs.sendMessage(job.tabId, {
     type: 'context:show', requestId: job.id, mode: job.mode, snapshot: job.snapshot,
     error, expanded: job.kind === 'details', captureId: job.captureId, coreText: job.state.coreText,
-    detailsText: job.state.detailsText, exampleKind: job.state.exampleKind
+    detailsText: job.state.detailsText, exampleKind: job.state.exampleKind,
+    replacesRequestId: job.replacesRequestId, pin: validPanelPin(pin) ? pin : undefined
   } satisfies ContextShowMessage, { documentId: job.documentId! });
   current(job); await verifyDocument(job); current(job);
   if (!result?.ok) throw new Error(result?.message || result?.error || '回答窗口未能显示，请刷新网页后重试。');
@@ -280,6 +294,7 @@ async function rerun(job: ContextJob, details: boolean) {
   const next = freshJob(job.tabId, job.frameId, job.mode, details ? 'details' : job.kind, details ? job.state.coreText : job.coreText);
   next.documentId = job.documentId; next.url = job.url; next.snapshot = job.snapshot;
   next.captureId = job.captureId; next.state.exampleKind = job.state.exampleKind;
+  next.replacesRequestId = job.id;
   next.state.savedId = job.state.savedId;
   replace(next);
   try { await show(next); } catch (error) { await showFailure(next, error); }
@@ -331,6 +346,7 @@ function bindPort(connection: chrome.runtime.Port) {
           const next = freshJob(job.tabId, job.frameId, job.mode, job.kind, job.coreText);
           next.documentId = job.documentId; next.url = job.url; next.snapshot = job.snapshot;
           next.captureId = job.captureId; next.state.exampleKind = job.state.exampleKind;
+          next.replacesRequestId = job.id;
           next.state.savedId = job.state.savedId;
           if (!next.snapshot) return;
           replace(next); await show(next);
@@ -362,6 +378,22 @@ export function initializeContextMenus(options?: { beforeRequest?: () => void; c
     });
     chrome.runtime.onConnect.addListener(bindPort);
     chrome.runtime.onMessage.addListener((input, sender, respond) => {
+      if (input?.type === 'context:panel-pin') {
+        const pin: unknown = input.pin;
+        if (pin !== null && !validPanelPin(pin)) { respond({ ok: false }); return; }
+        const write = panelPinQueue.then(async () => {
+          await authorizedSender(sender);
+          await secureStorage;
+          if (pin === null) await chrome.storage.local.remove(CONTEXT_PANEL_PIN);
+          else {
+            const { left, top, width, height } = pin;
+            await chrome.storage.local.set({ [CONTEXT_PANEL_PIN]: { left, top, width, height } });
+          }
+        });
+        panelPinQueue = write.catch(() => {});
+        void write.then(() => respond({ ok: true }), () => respond({ ok: false }));
+        return true;
+      }
       if (input?.type === 'context:selection-eligible') {
         void authorizedSender(sender).then(source => toolbarAllowed(source.url)).then(enabled => respond({ ok: true, enabled }), () => respond({ ok: true, enabled: false }));
         return true;
