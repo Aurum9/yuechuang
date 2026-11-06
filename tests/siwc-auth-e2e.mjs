@@ -128,8 +128,9 @@ try {
     await until(async () => (await rpc('siwc:get')).view.status.state === 'ready', 'login did not complete');
     await until(() => page.isClosed(), 'owned auth tab was not closed');
     await until(() => settings.locator('#siwc-model option[value="gpt-synthetic"]').count(), 'model catalog absent');
-    await settings.locator('#siwc-model').selectOption('gpt-synthetic'); await settings.locator('#save-connection').click();
-    assert.equal((await rpc('siwc:get')).view.config.provider, 'chatgptOAuth');
+    await until(async () => (await rpc('siwc:get')).view.config.provider === 'chatgptOAuth', 'subscription was not saved automatically');
+    assert.deepEqual((await rpc('siwc:get')).view.config, { provider: 'chatgptOAuth', model: 'gpt-synthetic' });
+    assert.equal(await settings.locator('#save-connection').isHidden(), true);
   });
   await check('actual content-script context cannot read credential storage or invoke login RPC', async () => {
     const page = await context.newPage(); await page.goto('https://fixture.example/');
@@ -183,7 +184,11 @@ try {
     } finally { await page.close(); }
   });
   await check('real worker termination retains pending PKCE and completes the original callback after restart', async () => {
-    await settings.locator('#siwc-new-account').click(); const page = await authPage(); const nonce = new URL(page.url()).searchParams.get('nonce');
+    await settings.locator('#connection-api').check();
+    await settings.locator('#save-connection').click();
+    await until(async () => (await rpc('siwc:get')).view.config.provider === 'apiKey');
+    await settings.evaluate(() => { void chrome.runtime.sendMessage({ type: 'siwc:login', newAccount: true }).catch(() => {}); });
+    const page = await authPage(); const nonce = new URL(page.url()).searchParams.get('nonce');
     const before = await worker.evaluate(() => chrome.storage.session.get('siwcPendingAuthV1'));
     const version = await until(() => [...versions.values()].filter(v => v.scriptURL === `chrome-extension://${extensionId}/background.js` && v.runningStatus === 'running' && v.status === 'activated').sort((a, b) => Number(b.versionId) - Number(a.versionId))[0]);
     await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId });
@@ -203,7 +208,7 @@ try {
     await worker.evaluate(value => { __authFixture.tokens = value; }, tokens(nonce));
     await page.locator('#approve').click().catch(e => { if (!page.isClosed()) throw e; });
     await until(() => page.isClosed());
-    await until(async () => { const v = (await rpc('siwc:get')).view; return v.status.state === 'ready' && !v.status.loginPending && v.status.models.length > 0; });
+    await until(async () => { const v = (await rpc('siwc:get')).view; return v.status.state === 'ready' && !v.status.loginPending && v.config.provider === 'chatgptOAuth' && v.config.model === 'gpt-synthetic'; });
     assert.equal(await worker.evaluate(() => __authFixture.requests.filter(r => r.grant === 'authorization_code').length), 1);
   });
   await check('stored credentials renew once after expiration and logout clears tokens', async () => {

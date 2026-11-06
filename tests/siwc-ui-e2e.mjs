@@ -249,20 +249,25 @@ try {
     await page.waitForFunction(() => document.querySelector('#siwc-identity').textContent === '已登录');
     assert.match(await page.locator('#siwc-entitlement').innerText(), /尚未授权/);
     assert.equal(await page.locator('#siwc-model').isDisabled(), true);
-    await page.locator('#save-connection').click();
-    await page.waitForFunction(() => document.querySelector('#connection-feedback').textContent.includes('授权套餐用量'));
+    assert.equal(await page.locator('#save-connection').isHidden(), true);
+    assert.equal(await page.evaluate(() => __siwcUi.config.provider), 'apiKey');
     assert.equal((await page.evaluate(() => __siwcUi.calls)).filter(value => value.type === 'siwc:save').length, 0);
   });
-  await check('ready model requires explicit save and does not claim a successful conversation', async () => {
-    await page.evaluate(() => { __siwcUi.status = { state: 'ready', loggedIn: true, planAuthorized: true, models: [{ id: 'mock-official-model', label: '模拟订阅模型' }], generation: 'unchecked', helperVersion: 'mock-1', accountLabel: '本地测试账号' }; });
+  await check('refresh only loads models and each explicit model change saves once', async () => {
+    await page.evaluate(() => { __siwcUi.status = { state: 'ready', loggedIn: true, planAuthorized: true, models: [{ id: 'mock-official-model', label: '模拟订阅模型' }, { id: 'another-model', label: '另一个模型' }], generation: 'unchecked', helperVersion: 'mock-1', accountLabel: '本地测试账号' }; });
     await page.locator('#siwc-refresh').click();
     await page.waitForFunction(() => !document.querySelector('#siwc-model').disabled);
     assert.match(await page.locator('#siwc-status').innerText(), /对话尚未验证/);
-    assert.equal(await page.evaluate(() => __siwcUi.config.provider), 'apiKey');
+    assert.deepEqual(await page.evaluate(() => __siwcUi.config), { provider: 'apiKey', model: '' });
+    assert.equal(await page.locator('#siwc-model').inputValue(), '');
+    assert.equal(await page.locator('#save-connection').isHidden(), true);
     await page.locator('#siwc-model').selectOption('mock-official-model');
-    await page.locator('#save-connection').click();
-    await page.waitForFunction(() => __siwcUi.config.provider === 'chatgptOAuth' && !document.querySelector('#save-connection').disabled);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.config), { provider: 'chatgptOAuth', model: 'mock-official-model' });
+    await page.waitForFunction(() => __siwcUi.config.model === 'mock-official-model' && !document.querySelector('#siwc-model').disabled);
+    await page.locator('#siwc-model').selectOption('another-model');
+    await page.waitForFunction(() => __siwcUi.config.model === 'another-model' && !document.querySelector('#siwc-model').disabled);
+    await page.locator('#siwc-refresh').click();
+    await page.waitForFunction(() => !document.querySelector('#siwc-model').disabled);
+    assert.deepEqual(await page.evaluate(() => __siwcUi.calls.filter(call => call.type === 'siwc:save').map(call => call.config.model)), ['mock-official-model', 'another-model']);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

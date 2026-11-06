@@ -159,8 +159,8 @@ function updateControls(): void {
   setup.hidden = !loaded || !connected || connectionReady;
   element('chat-setup-heading').textContent = oauth ? '连接 ChatGPT 订阅' : '先连接你的模型';
   element('chat-setup-text').textContent = oauth
-    ? state.siwcStatus?.loggedIn && !state.siwcStatus.planAuthorized ? '账号身份已验证。请到设置重新登录，授权 ChatGPT 套餐用量后选择模型并保存。'
-        : state.siwcStatus?.planAuthorized ? '请到设置刷新并选择官方 API 返回的可用模型，然后保存对话连接。'
+    ? state.siwcStatus?.loggedIn && !state.siwcStatus.planAuthorized ? '账号身份已验证。请到设置重新登录并授权 ChatGPT 套餐用量。'
+        : state.siwcStatus?.planAuthorized ? '请到设置刷新模型列表，再选择可用模型。选择后会自动保存。'
           : '在设置中选择「ChatGPT 订阅（官方登录）」，直接授权账号和套餐用量。日常聊天无需保留官网标签页。'
     : !state.hasKey ? '在设置中填写接口、模型和 Key，即可开始对话。' : '请在设置中补全模型配置，并授权接口所在的网站。';
   element('chat-empty').hidden = state.messages.length > 0;

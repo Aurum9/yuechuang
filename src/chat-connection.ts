@@ -1,9 +1,8 @@
 import { secureStorage } from './store';
 import { trustedPage } from './trusted-page';
-import type { ChatConnectionConfig, ChatConnectionView } from './chat-connection-shared';
-
 // Keep the old storage key so upgrades retain the selected supported provider.
-const CONFIG_KEY = 'webChatConfig';
+import { CHAT_CONNECTION_CONFIG_KEY as CONFIG_KEY, type ChatConnectionConfig, type ChatConnectionView } from './chat-connection-shared';
+
 const MIGRATION_KEY = 'chatConnectionMigration';
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const modelId = (value: unknown): value is string => typeof value === 'string' && (value === '' || /^[A-Za-z0-9_.:-]{1,160}$/.test(value));
@@ -41,11 +40,12 @@ async function readView(): Promise<ChatConnectionView> {
   return { config, ...(saved[MIGRATION_KEY] === 'webModeRemoved' ? { migration: 'webModeRemoved' as const } : {}) };
 }
 export function getChatConnectionView(): Promise<ChatConnectionView> { return enqueue(readView); }
-export function saveChatConnectionConfig(value: unknown): Promise<ChatConnectionView> {
+export function saveChatConnectionConfig(value: unknown, signal?: AbortSignal): Promise<ChatConnectionView> {
   const config = selectedConfig(value);
   return enqueue(async () => {
     const saved = await chrome.storage.local.get(CONFIG_KEY);
     const old = configValue(saved[CONFIG_KEY]);
+    signal?.throwIfAborted();
     await chrome.storage.local.set({ [CONFIG_KEY]: config, [MIGRATION_KEY]: null });
     if (old.provider !== config.provider || old.model !== config.model) onConfigChange();
     return { config };

@@ -39,11 +39,11 @@
                 <p id="siwc-logout-notice" class="field-help" role="status" hidden>本机凭证已清除，远端授权撤销尚未确认。可在 OpenAI 账号的应用授权设置中检查或撤销。</p>
                 <p class="field-help">从旧版助手升级后，请在这里重新登录。需要切换账号时，点击「使用其他账号」重新进行官方授权。</p>
                 <p class="field-help">检查会访问 OpenAI 获取授权状态和可用模型，不发送聊天问题。登录授权成功后，仍需发送一次问题验证实际对话能力。</p>
-                <div class="field"><label for="siwc-model">ChatGPT 订阅模型</label><select id="siwc-model" aria-describedby="siwc-model-help"><option value="">授权套餐用量后选择可用模型</option></select><p class="field-help" id="siwc-model-help">仅显示官方 API 返回的可用模型。对话保存在当前浏览器会话中，不会写入 ChatGPT 官网聊天列表。</p></div>
+                <div class="field"><label for="siwc-model">ChatGPT 订阅模型</label><select id="siwc-model" aria-describedby="siwc-model-help"><option value="">授权套餐用量后选择可用模型</option></select><p class="field-help" id="siwc-model-help">授权成功后自动保存订阅连接，更换模型时也会自动保存。对话保存在当前浏览器会话中，不会写入 ChatGPT 官网聊天列表。</p></div>
               </div>
               <p class="connection-scope">侧栏对话、划词翻译、解释和例句使用此连接。文章摘要和跨页研究使用下方的模型 API 配置。</p>
               <div id="connection-feedback" class="connection-feedback" role="status" aria-live="polite" hidden></div>
-              <div class="form-actions connection-save-actions"><button type="submit" class="button button-primary" id="save-connection">保存连接</button><span id="connection-save-state" class="save-state">正在读取…</span></div>
+              <div class="form-actions connection-save-actions" id="connection-save-actions"><button type="submit" class="button button-primary" id="save-connection">保存连接</button><span id="connection-save-state" class="save-state">正在读取…</span></div>
             </form>
           </section>
           <section class="card" aria-labelledby="model-heading">
