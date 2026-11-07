@@ -103,6 +103,18 @@ export async function ensureSiwcReady(): Promise<SiwcView> {
   if (login || status.loginPending) return getSiwcView();
   return checking ?? (status.state === 'unchecked' || status.state === 'ready' && !status.models.length ? refreshSiwc(false) : getSiwcView());
 }
+async function activateSubscription(before: number): Promise<void> {
+  if (before !== revision || status.state !== 'ready' || !status.planAuthorized || !status.models.length) return;
+  const signal = accessController.signal;
+  try {
+    const { config } = await getChatConnectionView();
+    if (signal.aborted) return;
+    if (config.provider === 'chatgptOAuth' && status.models.some(model => model.id === config.model)) return;
+    await saveChatConnectionConfig({ provider: 'chatgptOAuth', model: status.models[0].id }, signal);
+  } catch {
+    if (!signal.aborted) status = { ...status, state: 'error', error: '订阅连接保存失败，请检查扩展存储，刷新模型列表后重新选择模型。' };
+  }
+}
 async function loginSiwc(newAccount = false): Promise<SiwcView> {
   if (login) throw new SiwcFailure('auth');
   await permissions();
@@ -116,7 +128,10 @@ async function loginSiwc(newAccount = false): Promise<SiwcView> {
       status = next;
       if (next.planAuthorized) {
         const catalog = await models();
-        if (before === revision) status = { ...next, models: catalog };
+        if (before === revision) {
+          status = { ...next, models: catalog };
+          await activateSubscription(before);
+        }
       }
     }
   } catch (error) {
@@ -162,7 +177,7 @@ async function errorShape(response: Response): Promise<unknown> {
   finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
 }
 
-export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void, purpose: 'chat' | 'context' = 'chat'): Promise<string> {
+export async function requireSiwcModel(signal: AbortSignal): Promise<{ model: string; accountId: string }> {
   signal.throwIfAborted();
   const view = await ensureSiwcReady();
   signal.throwIfAborted();
@@ -170,12 +185,18 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
   if (view.status.loginPending) throw new SiwcFailure('authBusy');
   if (view.status.state === 'planDenied') throw new SiwcFailure('planDenied');
   if (view.status.state === 'permissionRequired') throw new SiwcFailure('permission');
-  if (view.status.state !== 'ready') {
+  if (view.status.state !== 'ready' || !view.status.accountId) {
     if (view.status.error) throw new Error(view.status.error);
     throw new SiwcFailure('signedOut');
   }
   if (!view.status.models.some(item => item.id === view.config.model)) throw new SiwcFailure('model');
   await permissions();
+  signal.throwIfAborted();
+  return { model: view.config.model, accountId: view.status.accountId };
+}
+
+export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void, purpose: 'chat' | 'context' | 'summary' = 'chat'): Promise<string> {
+  const { model } = await requireSiwcModel(signal);
   const before = revision;
   let diagnostic: SiwcDiagnostic = { stage: 'preflight' };
   const owner = new AbortController();
@@ -197,7 +218,7 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
     onText(text);
   }, onUpdate);
   try {
-    const body = siwcRequestBody(view.config.model, messages, purpose === 'chat');
+    const body = siwcRequestBody(model, messages, purpose === 'chat');
     diagnostic.stage = 'credentials';
     const credential = await token(combined);
     combined.throwIfAborted();
@@ -258,10 +279,13 @@ function trusted(sender: chrome.runtime.MessageSender): boolean { return trusted
 export function initializeSiwc(options: { onConfigChange?: () => void } = {}): void {
   if (options.onConfigChange) onChange = options.onConfigChange;
   if (initialized) return; initialized = true;
-  siwcAuth.initialize(() => {
+  siwcAuth.initialize(completed => {
     if (login) return;
-    clearSiwcAccessToken(); status = empty();
-    void refreshSiwc().then(() => onChange());
+    const refresh = refreshSiwc();
+    const before = revision;
+    void refresh.then(async () => {
+      if (completed) await activateSubscription(before);
+    }).catch(() => {}).finally(() => onChange());
   });
   chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
     if (!record(message) || typeof message.type !== 'string' || !message.type.startsWith('siwc:')) return;
@@ -269,14 +293,15 @@ export function initializeSiwc(options: { onConfigChange?: () => void } = {}): v
     const run = async () => {
       switch (message.type) {
         case 'siwc:get': return getSiwcView();
-        case 'siwc:refresh': return refreshSiwc();
+        case 'siwc:refresh': return login || status.loginPending ? getSiwcView() : refreshSiwc();
         case 'siwc:login': return loginSiwc(message.newAccount === true);
         case 'siwc:cancel': cancelLogin(); await siwcAuth.call('cancelLogin'); return refreshSiwc();
         case 'siwc:logout': return logoutSiwc();
         case 'siwc:save': {
           const config = message.config;
-          if (!record(config) || config.provider !== 'chatgptOAuth' || typeof config.model !== 'string' || config.model !== '' && !status.models.some(item => item.id === config.model)) throw new SiwcFailure('model');
-          await saveChatConnectionConfig({ provider: 'chatgptOAuth', model: config.model });
+          if (login || status.loginPending) throw new SiwcFailure('authBusy');
+          if (status.state !== 'ready' || !status.planAuthorized || !record(config) || config.provider !== 'chatgptOAuth' || typeof config.model !== 'string' || !status.models.some(item => item.id === config.model)) throw new SiwcFailure('model');
+          await saveChatConnectionConfig({ provider: 'chatgptOAuth', model: config.model }, accessController.signal);
           return getSiwcView();
         }
         default: throw new SiwcFailure('auth');

@@ -68,6 +68,7 @@ try {
       id: 'mock-extension-id', getURL: value => origin + '/' + value, getManifest: () => ({ version }),
       async sendMessage(value) {
         mock.calls.push(copy(value));
+        if (value.type === 'context:toolbar-sites') return { ok: true, sites: [] };
         if (value.type === 'settings:get') return { ok: true, settings: copy(mock.settings), hasKey: mock.hasKey, permissions: [], cacheCount: 0 };
         if (value.type === 'connection:get') return connectionView();
         if (value.type === 'connection:save') {
@@ -114,6 +115,14 @@ try {
         return port;
       },
     };
+    globalThis.chrome.windows = { async getCurrent() { return { id: 1 }; } };
+    globalThis.chrome.tabs = { onActivated: { addListener() {} }, onRemoved: { addListener() {} } };
+    globalThis.chrome.webNavigation = {
+      onCommitted: { addListener() {} },
+      onHistoryStateUpdated: { addListener() {} },
+      onReferenceFragmentUpdated: { addListener() {} },
+    };
+    globalThis.chrome.storage = { onChanged: { addListener() {} } };
     globalThis.chrome.permissions = {
       async request(value) { mock.permissions.push(copy(value)); return true; },
       onAdded: { addListener() {} }, onRemoved: { addListener() {} },
@@ -135,7 +144,7 @@ try {
     const saved = await page.evaluate(() => ({ config: __siwcUi.config, saves: __siwcUi.calls.filter(value => value.type === 'connection:save'), calls: __siwcUi.calls, permissions: __siwcUi.permissions, commands: __siwcUi.commands }));
     assert.deepEqual(saved.config, { provider: 'apiKey', model: '' });
     assert.deepEqual(saved.saves, [{ type: 'connection:save', config: { provider: 'apiKey', model: '' } }]);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
     assert.deepEqual(saved.commands, []);
     assert.equal(await page.locator('#connection-api').isChecked(), true);
@@ -171,7 +180,7 @@ try {
     assert.equal(await page.locator('#input-budget').inputValue(), '24000');
     assert.match(await page.locator('#key-status').innerText(), /已有本机 Key/);
     assert.equal(saved.hasKey, true);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 900 });
@@ -202,7 +211,7 @@ try {
       { type: 'connection:save', config: { provider: 'apiKey', model: '' } },
       { type: 'connection:save', config: { provider: 'apiKey', model: '' } },
     ]);
-    assert.equal(saved.calls.every(value => ['settings:get', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
+    assert.equal(saved.calls.every(value => ['settings:get', 'context:toolbar-sites', 'siwc:get', 'connection:get', 'connection:save'].includes(value.type)), true);
     assert.deepEqual(saved.permissions, []);
   });
   await page.goto(origin + '/options.html');
@@ -224,7 +233,7 @@ try {
     await page.locator('#siwc-cancel').click();
     await page.waitForFunction(() => !__siwcUi.status.loginPending && !document.querySelector('#save-connection').disabled);
     assert.equal((await page.evaluate(() => __siwcUi.calls)).some(value => value.type === 'siwc:cancel'), true);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions[0]), { origins: ['https://auth.openai.com/*', 'https://api.openai.com/*', 'http://127.0.0.1/*'] });
+    assert.deepEqual(await page.evaluate(() => __siwcUi.permissions), []);
   });
   await check('browser-only sign-in has no helper installer or extension registration controls', async () => {
     assert.equal(await page.locator('#siwc-extension-id, #siwc-copy-id, #siwc-helper-help').count(), 0);
@@ -247,20 +256,25 @@ try {
     await page.waitForFunction(() => document.querySelector('#siwc-identity').textContent === '已登录');
     assert.match(await page.locator('#siwc-entitlement').innerText(), /尚未授权/);
     assert.equal(await page.locator('#siwc-model').isDisabled(), true);
-    await page.locator('#save-connection').click();
-    await page.waitForFunction(() => document.querySelector('#connection-feedback').textContent.includes('授权套餐用量'));
+    assert.equal(await page.locator('#save-connection').isHidden(), true);
+    assert.equal(await page.evaluate(() => __siwcUi.config.provider), 'apiKey');
     assert.equal((await page.evaluate(() => __siwcUi.calls)).filter(value => value.type === 'siwc:save').length, 0);
   });
-  await check('ready model requires explicit save and does not claim a successful conversation', async () => {
-    await page.evaluate(() => { __siwcUi.status = { state: 'ready', loggedIn: true, planAuthorized: true, models: [{ id: 'mock-official-model', label: '模拟订阅模型' }], generation: 'unchecked', helperVersion: 'mock-1', accountLabel: '本地测试账号' }; });
+  await check('refresh only loads models and each explicit model change saves once', async () => {
+    await page.evaluate(() => { __siwcUi.status = { state: 'ready', loggedIn: true, planAuthorized: true, models: [{ id: 'mock-official-model', label: '模拟订阅模型' }, { id: 'another-model', label: '另一个模型' }], generation: 'unchecked', helperVersion: 'mock-1', accountLabel: '本地测试账号' }; });
     await page.locator('#siwc-refresh').click();
     await page.waitForFunction(() => !document.querySelector('#siwc-model').disabled);
     assert.match(await page.locator('#siwc-status').innerText(), /对话尚未验证/);
-    assert.equal(await page.evaluate(() => __siwcUi.config.provider), 'apiKey');
+    assert.deepEqual(await page.evaluate(() => __siwcUi.config), { provider: 'apiKey', model: '' });
+    assert.equal(await page.locator('#siwc-model').inputValue(), '');
+    assert.equal(await page.locator('#save-connection').isHidden(), true);
     await page.locator('#siwc-model').selectOption('mock-official-model');
-    await page.locator('#save-connection').click();
-    await page.waitForFunction(() => __siwcUi.config.provider === 'chatgptOAuth' && !document.querySelector('#save-connection').disabled);
-    assert.deepEqual(await page.evaluate(() => __siwcUi.config), { provider: 'chatgptOAuth', model: 'mock-official-model' });
+    await page.waitForFunction(() => __siwcUi.config.model === 'mock-official-model' && !document.querySelector('#siwc-model').disabled);
+    await page.locator('#siwc-model').selectOption('another-model');
+    await page.waitForFunction(() => __siwcUi.config.model === 'another-model' && !document.querySelector('#siwc-model').disabled);
+    await page.locator('#siwc-refresh').click();
+    await page.waitForFunction(() => !document.querySelector('#siwc-model').disabled);
+    assert.deepEqual(await page.evaluate(() => __siwcUi.calls.filter(call => call.type === 'siwc:save').map(call => call.config.model)), ['mock-official-model', 'another-model']);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

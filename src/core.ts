@@ -3,12 +3,13 @@ export const PROMPT_VERSION = 'zh-inline-fulltext-2';
 export const MAX_TEXT = 300_000;
 export function allowedUrl(value: string): URL {
   const url = new URL(value);
-  if (url.username || url.password || !(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('仅支持 HTTPS 网页及本机 localhost / 127.0.0.1 HTTP。');
+  if (url.username || url.password || !['http:', 'https:'].includes(url.protocol)) throw new Error('仅支持不含用户名和密码的 HTTP 或 HTTPS 网页。');
   if (url.hostname === 'chromewebstore.google.com' || (url.hostname === 'chrome.google.com' && url.pathname.startsWith('/webstore'))) throw new Error('Chrome 应用商店属于受限页面，无法读取。');
   return url;
 }
 export function apiEndpoint(value: string): string {
   const url = allowedUrl(value.trim());
+  if (url.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('模型接口请使用 HTTPS，或本机 localhost / 127.0.0.1 的 HTTP。');
   if (url.search || url.hash) throw new Error('接口地址不能包含查询参数或片段。');
   url.pathname = url.pathname.replace(/\/+$/, '');
   if (!url.pathname.endsWith('/chat/completions')) url.pathname += '/chat/completions';
@@ -35,8 +36,11 @@ export async function digest(value: string): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
 }
-export async function cacheKey(url: string, text: string, settings: Settings, key: string): Promise<string> {
-  return digest(JSON.stringify([url, await digest(text), apiEndpoint(settings.baseUrl), settings.model, settings.inputBudgetTokens, await digest(key), 'zh', PROMPT_VERSION]));
+export async function cacheKey(url: string, text: string, settings: Settings, key: string, subscription?: { model: string; accountId: string }): Promise<string> {
+  const endpoint = subscription ? 'chatgptOAuth' : apiEndpoint(settings.baseUrl);
+  const model = subscription?.model ?? settings.model;
+  const scope = await digest(subscription?.accountId ?? key);
+  return digest(JSON.stringify([url, await digest(text), endpoint, model, settings.inputBudgetTokens, scope, 'zh', PROMPT_VERSION]));
 }
 export class SSEParser {
   private buffer = '';

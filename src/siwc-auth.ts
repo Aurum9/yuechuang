@@ -47,9 +47,9 @@ export class SiwcAuth {
   private waiters = new Map<string, Waiter>();
   private controllers = new Set<AbortController>();
   private generation = 0;
-  private notify = () => {};
+  private notify: (completed: boolean) => void = () => {};
 
-  initialize(onRecovered = () => {}): void {
+  initialize(onRecovered: (completed: boolean) => void = () => {}): void {
     this.notify = onRecovered;
     if (this.initialized) return;
     this.initialized = true;
@@ -183,7 +183,7 @@ export class SiwcAuth {
     // Never wait for a tab-removal event while holding the mutation queue.
     await this.closeTab(pending.tabId);
     if (waiter) error ? waiter.reject(failure(error)) : waiter.resolve(result);
-    else this.notify();
+    else this.notify(!error);
   }
   private observe(tabId: number, raw: string): void {
     let url: URL;

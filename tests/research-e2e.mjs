@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { startResearchFixtures, RIVER_QUOTE, STREAM_QUOTE, HTML_MARKER } from './fixtures/research-server.mjs';
 import { hashDirectory, buildFingerprint } from '../scripts/artifact-hashes.mjs';
 
-const version = '0.9.1';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const { version } = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
 const output = path.join(root, 'test-results');
 const screenshots = path.join(output, `research-${version}`);
 await fs.mkdir(screenshots, { recursive: true });
@@ -34,14 +34,14 @@ const productionDirectory = path.join(root, 'dist');
 const testedFiles = await hashDirectory(productionDirectory);
 const productionManifest = await fs.readFile(path.join(productionDirectory, 'manifest.json'), 'utf8');
 const manifest = JSON.parse(productionManifest);
-assert.equal(manifest.version, version, 'Build research 0.9.1 before running research e2e');
+assert.equal(manifest.version, version, 'Build the current extension before running research e2e');
 const report = {
   mockOnly: true, realModelVerified: false, extensionVersion: version, date: new Date().toISOString(), checks: [], network: [],
   testedBuild: { fingerprint: buildFingerprint(testedFiles), files: testedFiles, unchangedAfterTest: false },
   testHarness: {
     productionWorkerWithoutTestEntry: true, productionSourceModified: false, testCopyRestored: false,
     trustedResearchFormAndButtonClicks: true,
-    permissionBootstrap: 'Temporary test-copy manifest grants only the 127.0.0.1 loopback host; production manifest bytes are restored and the extension reloaded before feature checks.'
+    permissionBootstrap: 'The fresh profile loads a byte-identical copy of the production manifest with website access.',
   },
   notes: [
     'Research runs through the packaged research.html form and unchanged production worker; loopback documents and JSON/SSE responses are deterministic mocks.',
@@ -136,35 +136,22 @@ async function download(button = '#export-report') {
 }
 
 try {
-  await launch(productionDirectory); await openOptions(); await openResearch();
-  await check('empty research page opens without Key or grants and performs zero requests', async () => {
-    const response = await view(); assert.equal(response.hasKey, false); assert.deepEqual(response.permissions, []); assert.deepEqual(response.reports, []);
+  await fs.cp(productionDirectory, testExtension, { recursive: true });
+  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
+  await launch(testExtension); await openOptions(); await openResearch();
+  await check('empty research page opens without Key and performs zero requests', async () => {
+    const response = await view(); assert.equal(response.hasKey, false); assert.deepEqual(response.reports, []);
     assert.equal(await research.locator('#task-empty').isVisible(), true); assert.equal(await research.locator('#saved-empty').isVisible(), true);
     assert.equal(await research.locator('#start-research').isDisabled(), true); assert.equal(total(), 0); assert.equal(pageCount(), 0);
     await research.screenshot({ path: path.join(screenshots, 'empty-desktop.png'), fullPage: true });
   });
-  await context.close();
-  await fs.cp(productionDirectory, testExtension, { recursive: true });
-  const manifestPath = path.join(testExtension, 'manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
-  await launch(testExtension); await fs.writeFile(manifestPath, productionManifest);
-  const browserSettings = await context.newPage(); await browserSettings.goto('chrome://extensions');
-  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await browserSettings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await until(async () => {
-    for (const candidate of context.serviceWorkers()) {
-      try { if (new URL(candidate.url()).hostname === extensionId && await candidate.evaluate(() => chrome.runtime.getManifest().version === '0.9.1' && chrome.runtime.getManifest().host_permissions === undefined)) return candidate; } catch {}
-    }
-  }, 'restored production worker unavailable');
-  await browserSettings.close();
-  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
   await openOptions(); await configure('normal', 16000, fakeKey); await openResearch(); report.extensionId = extensionId;
 
   await check('five URL limit, duplicate URLs and invalid schemes are blocked with zero document or model requests', async () => {
     const before = total(), beforePages = pageCount();
     await fill('比较这些技术文档。', Array.from({ length: 5 }, (_, index) => `/river?v=${index}`));
     assert.equal(await research.locator('#start-research').isEnabled(), true);
-    for (const paths of [Array.from({ length: 6 }, (_, index) => `/river?v=${index}`), ['/river', '/river'], ['javascript:alert(1)'], ['http://remote.test/article']]) {
+    for (const paths of [Array.from({ length: 6 }, (_, index) => `/river?v=${index}`), ['/river', '/river'], ['javascript:alert(1)'], ['ftp://remote.test/article']]) {
       await fill('比较这些技术文档。', paths); assert.equal(await research.locator('#start-research').isDisabled(), true);
       const response = await research.evaluate(payload => chrome.runtime.sendMessage({ type: 'research:start', ...payload }), { question: '比较这些技术文档。', urls: paths.map(value => value.startsWith('/') ? url(value) : value) });
       assert.equal(response.ok, false);
@@ -174,9 +161,19 @@ try {
   });
   await check('ungranted document host blocks both the UI and direct start without any request', async () => {
     const before = total(), beforePages = pageCount(), ungranted = `http://localhost:${new URL(fixtures.origin).port}/river`;
-    await fill('研究未授权的网页。', [ungranted]); assert.equal(await research.locator('#start-research').isDisabled(), true);
-    const response = await research.evaluate(value => chrome.runtime.sendMessage({ type: 'research:start', question: '研究未授权的网页。', urls: [value] }), ungranted);
-    assert.equal(response.ok, false); assert.match(response.error, /授权/); assert.equal(total(), before); assert.equal(pageCount(), beforePages);
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    try {
+      await manager.evaluate(async extensionId => {
+        await chrome.developerPrivate.updateExtensionConfiguration({ extensionId, hostAccess: 'ON_CLICK' });
+        await chrome.developerPrivate.addHostPermission(extensionId, 'http://127.0.0.1/*');
+      }, extensionId);
+      await fill('研究未授权的网页。', [ungranted]); assert.equal(await research.locator('#start-research').isDisabled(), true);
+      const response = await research.evaluate(value => chrome.runtime.sendMessage({ type: 'research:start', question: '研究未授权的网页。', urls: [value] }), ungranted);
+      assert.equal(response.ok, false); assert.match(response.error, /权限/); assert.equal(total(), before); assert.equal(pageCount(), beforePages);
+    } finally {
+      await manager.evaluate(extensionId => chrome.developerPrivate.updateExtensionConfiguration({ extensionId, hostAccess: 'ON_ALL_SITES' }), extensionId);
+      await manager.close();
+    }
   });
   await check('two real documents produce exactly three calls and every report citation targets a verified original quote', async () => {
     fixtures.reset(); await start('比较 RiverFlow 与 StreamJet 的背压方式及缓冲区大小。', ['/river', '/stream']);
@@ -228,7 +225,7 @@ try {
     await options.screenshot({ path: path.join(screenshots, 'settings-mobile.png'), fullPage: true }); await options.setViewportSize({ width: 1280, height: 900 });
     await research.bringToFront(); await research.setViewportSize({ width: 390, height: 844 });
     assert.ok(await research.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'research page overflows 390px');
-    for (const selector of ['#question', '#urls', '#authorize', '#export-report']) { const box = await research.locator(selector).boundingBox(); assert.ok(box && box.x >= 0 && box.x + box.width <= 391, selector); }
+    for (const selector of ['#question', '#urls', '#export-report']) { const box = await research.locator(selector).boundingBox(); assert.ok(box && box.x >= 0 && box.x + box.width <= 391, selector); }
     await research.screenshot({ path: path.join(screenshots, 'comparison-mobile.png'), fullPage: true }); await research.setViewportSize({ width: 1280, height: 900 });
     return { viewportWidth: 390, horizontalOverflow: false, settingsEntry: true };
   });
@@ -321,7 +318,10 @@ try {
     return { sameProfile: true, savedCount: 1, sessionKeyCleared: true };
   });
   await check('saved report can be viewed, exported and deleted offline without Key or website permissions', async () => {
-    const before = total(); await options.evaluate(() => chrome.permissions.remove({ origins: ['http://127.0.0.1/*'] }));
+    const before = total();
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    await manager.evaluate(extensionId => chrome.developerPrivate.updateExtensionConfiguration({ extensionId, hostAccess: 'ON_CLICK' }), extensionId);
+    await manager.close();
     await research.bringToFront(); await research.locator('#refresh-reports').click(); await until(async () => (await view()).permissions.length === 0, 'permissions not removed');
     await savedCards().first().locator('[data-action="view"]').click(); assert.match(await research.locator('#report').innerText(), /256/);
     const text = await download(); assert.ok(text.includes(RIVER_QUOTE)); assert.ok(text.includes(STREAM_QUOTE)); assert.equal(total(), before);

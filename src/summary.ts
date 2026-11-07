@@ -20,7 +20,7 @@ function units(text: string): number {
 export function estimateTokens(text: string): number { return Math.ceil(units(text) * 1.1 / 3); }
 
 /** Lossless ordered splitting: prefer paragraphs, preserve emoji/combining graphemes. */
-export function splitText(text: string, tokenBudget: number): string[] {
+export function splitText(text: string, tokenBudget: number, maxCharacters = Infinity): string[] {
   if (!Number.isFinite(tokenBudget) || tokenBudget < 5) throw new Error('可用正文预算过小，请提高单次预算。');
   const maximum = Math.floor(tokenBudget * 3 / 1.1);
   const atoms = text.match(/[\s\S]+?(?:\n[ \t]*\n|$)/g) ?? [];
@@ -29,13 +29,13 @@ export function splitText(text: string, tokenBudget: number): string[] {
   const flush = () => { if (buffer) result.push(buffer); buffer = ''; used = 0; };
   for (const atom of atoms) {
     const size = units(atom);
-    if (used + size <= maximum) { buffer += atom; used += size; continue; }
+    if (used + size <= maximum && buffer.length + atom.length <= maxCharacters) { buffer += atom; used += size; continue; }
     flush();
-    if (size <= maximum) { buffer = atom; used = size; continue; }
+    if (size <= maximum && atom.length <= maxCharacters) { buffer = atom; used = size; continue; }
     for (const { segment: point } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(atom)) {
       const weight = units(point);
-      if (weight > maximum) throw new Error('一个完整字符簇超过可用预算，请提高单次预算。');
-      if (used + weight > maximum) flush();
+      if (weight > maximum || point.length > maxCharacters) throw new Error('一个完整字符簇超过可用预算，请提高单次预算或缩小范围。');
+      if (used + weight > maximum || buffer.length + point.length > maxCharacters) flush();
       buffer += point; used += weight;
     }
   }
@@ -55,23 +55,25 @@ function messages(article: Article, mode: 'direct'|'section'|'reduce'|'final', t
 }
 function requestEstimate(input: CompletionMessage[]): number { return input.reduce((sum, item) => sum + estimateTokens(item.content) + 8, 0); }
 interface Layout { plan: SummaryPlan; segments: string[]; output: number; noteLimit: number; noteCharacters: number; fanIn: number; budget: number }
-function layout(article: Article, settings: Settings): Layout {
+function layout(article: Article, settings: Settings, maxMessageCharacters: number): Layout {
   if (!article.text.trim()) throw new Error('未取得足够正文，无法规划摘要。');
   if (article.text.length >= SUMMARY_RESOURCE_LIMIT) throw new Error('正文达到 300,000 字符资源上限，已停止处理；本次没有生成全文摘要。请选择较小范围后手动重试。');
   const budget = settings.inputBudgetTokens ?? 16_000;
   if (!Number.isInteger(budget) || budget < 2048 || budget > 128_000) throw new Error('单次预算应为 2,048—128,000 的整数。');
   const output = Math.max(512, Math.min(1536, Math.floor(budget / 5)));
   const base = { estimatedTokens: estimateTokens(article.text), characters: article.text.length };
-  if (requestEstimate(messages(article, 'direct', article.text)) + output + ENVELOPE_MARGIN <= budget) {
+  const direct = messages(article, 'direct', article.text);
+  if (requestEstimate(direct) + output + ENVELOPE_MARGIN <= budget && direct.every(message => message.content.length <= maxMessageCharacters)) {
     return { plan: { strategy: 'direct', segments: 1, requests: 1, ...base }, segments: [article.text], output, noteLimit: 0, noteCharacters: 0, fanIn: 1, budget };
   }
   const mergeCapacity = budget - output - ENVELOPE_MARGIN - Math.max(requestEstimate(messages(article, 'reduce', '')), requestEstimate(messages(article, 'final', '')));
   const noteLimit = Math.min(1000, Math.floor((mergeCapacity - 64) / 3));
   if (noteLimit < 96) throw new Error('标题、网址或导语占用的预算过多，无法可靠整合全文。请提高单次预算。');
   const noteCharacters = Math.max(24, Math.floor(noteLimit / 3.6));
-  const sectionCapacity = budget - output - ENVELOPE_MARGIN - requestEstimate(messages(article, 'section', '', noteCharacters));
+  const sectionEnvelope = messages(article, 'section', '', noteCharacters);
+  const sectionCapacity = budget - output - ENVELOPE_MARGIN - requestEstimate(sectionEnvelope);
   if (sectionCapacity < 96) throw new Error('可用正文预算不足，请提高单次预算。');
-  const segments = splitText(article.text, sectionCapacity);
+  const segments = splitText(article.text, sectionCapacity, maxMessageCharacters - sectionEnvelope[1].content.length);
   const fanIn = Math.max(2, Math.min(8, Math.floor(mergeCapacity / (noteLimit + 32))));
   let remaining = segments.length; let requests = remaining;
   while (remaining > fanIn) { remaining = Math.ceil(remaining / fanIn); requests += remaining; }
@@ -79,11 +81,18 @@ function layout(article: Article, settings: Settings): Layout {
   return { plan: { strategy: 'sections', segments: segments.length, requests, ...base }, segments, output, noteLimit, noteCharacters, fanIn, budget };
 }
 /** Planning never contacts the API. `requests` is an estimated upper bound. */
-export function planSummary(article: Article, settings: Settings): SummaryPlan { return layout(article, settings).plan; }
+export function planSummary(article: Article, settings: Settings, maxMessageCharacters = Infinity): SummaryPlan { return layout(article, settings, maxMessageCharacters).plan; }
 
-export async function summarizeArticle(settings: Settings, key: string, article: Article, signal: AbortSignal, onText: (text: string) => void, onProgress: (progress: SummaryProgress) => void): Promise<string> {
+type SummaryCompletion = (input: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, maxOutputTokens: number) => Promise<string>;
+export interface SummaryTransport { complete: SummaryCompletion; maxMessageCharacters: number }
+
+export async function summarizeArticle(settings: Settings, key: string, article: Article, signal: AbortSignal, onText: (text: string) => void, onProgress: (progress: SummaryProgress) => void,
+  transport?: SummaryTransport): Promise<string> {
   signal.throwIfAborted();
-  const prepared = layout(article, settings);
+  const maxMessageCharacters = transport?.maxMessageCharacters ?? Infinity;
+  const prepared = layout(article, settings, maxMessageCharacters);
+  const complete: SummaryCompletion = transport?.complete ??
+    ((input, signal, onText, maxOutputTokens) => requestCompletion(settings, key, input, signal, onText, undefined, maxOutputTokens));
   const overall = new AbortController();
   const combined = AbortSignal.any([signal, overall.signal]);
   const timer = setTimeout(() => overall.abort(), SUMMARY_DEADLINE_MS);
@@ -96,16 +105,17 @@ export async function summarizeArticle(settings: Settings, key: string, article:
     combined.throwIfAborted();
     const input = messages(article, mode, source, prepared.noteCharacters);
     if (requestEstimate(input) + prepared.output + ENVELOPE_MARGIN > prepared.budget) throw new Error('本次整合输入超过估算预算，全文摘要尚未完成。请提高预算后手动重试。');
+    if (input.some(message => message.content.length > maxMessageCharacters)) throw new Error('本次整合输入超过连接的长度上限，全文摘要尚未完成。');
     stage = mode === 'section' ? 'section' : 'merge';
     call++;
     onProgress(stage === 'section'
       ? { stage, current: completedNotes.length + 1, total: prepared.segments.length }
       : { stage, current: prepared.plan.strategy === 'direct' ? 1 : call - prepared.segments.length, total: prepared.plan.strategy === 'direct' ? 1 : prepared.plan.requests - prepared.segments.length });
     currentPartial = '';
-    const output = await requestCompletion(settings, key, input, combined, text => {
+    const output = await complete(input, combined, text => {
       combined.throwIfAborted(); currentPartial = text;
       onText(mode === 'direct' || mode === 'final' ? text : `全文摘要尚未完成 · ${stage === 'section' ? '正在提取分段事实' : '正在分层整合'}\n\n${ledger()}${completedNotes.length ? '\n\n' : ''}${text}`);
-    }, undefined, mode === 'section' || mode === 'reduce' ? Math.min(prepared.output, prepared.noteLimit) : prepared.output);
+    }, mode === 'section' || mode === 'reduce' ? Math.min(prepared.output, prepared.noteLimit) : prepared.output);
     combined.throwIfAborted();
     if ((mode === 'section' || mode === 'reduce') && estimateTokens(output) > prepared.noteLimit) {
       throw new Error('模型分段提要超出预留整合预算，全文摘要尚未完成。已保留分段结果，请提高预算后手动重试。');

@@ -10,6 +10,7 @@ const output = path.join(root, 'test-results'), dist = path.join(root, 'dist');
 const baseline = process.argv.includes('--baseline');
 const manifestText = await fs.readFile(path.join(dist, 'manifest.json'), 'utf8');
 const manifest = JSON.parse(manifestText), version = manifest.version;
+const bootstrapLoopback = !manifest.host_permissions?.length;
 const testedFiles = await hashDirectory(dist);
 await fs.mkdir(output, { recursive: true });
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) for (const directory of ['.cache/ms-playwright', '.browsers']) {
@@ -33,7 +34,7 @@ const report = {
     realRuntimePorts: true, mockedRuntimePorts: false, serviceWorkerStop: 'CDP ServiceWorker.stopWorker, scoped to this isolated extension version ID',
     modelFixture: 'Only deterministic loopback API SSE is mocked. Real Chrome MV3 worker teardown and runtime.Port disconnection are exercised.',
     noRealHelperOrAccount: true, nativeSidePanelSurfaceVerified: false,
-    permissionBootstrap: 'Temporary test-copy manifest grants only 127.0.0.1; exact production bytes are restored and extension reloaded before tests.',
+    permissionBootstrap: bootstrapLoopback ? 'Legacy build temporarily grants 127.0.0.1 before restoring and reloading the production manifest.' : 'The test copy uses the production manifest and its declared website permissions.',
     networkBoundary: 'All DNS names are blocked by isolated Chromium host-resolver rules. Model traffic is literal 127.0.0.1 only.'
   },
   notes: ['The exact packaged sidepanel.html runs as an extension tab; browser toolbar and docked panel rendering are outside this test.',
@@ -107,8 +108,9 @@ async function waitForRecovery() {
   worker = await until(() => context.serviceWorkers().find(candidate => candidate.url() === `chrome-extension://${extensionId}/background.js`), 'restarted worker unavailable');
 }
 try {
-  await fs.cp(dist, extension, { recursive: true }); const manifestPath = path.join(extension, 'manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
+  await fs.cp(dist, extension, { recursive: true });
+  const manifestPath = path.join(extension, 'manifest.json');
+  if (bootstrapLoopback) await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 500, height: 900 },
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--no-first-run', '--no-proxy-server', '--host-resolver-rules=EXCLUDE 127.0.0.1, EXCLUDE localhost, MAP * ~NOTFOUND'] });
   context.setDefaultTimeout(8000);
@@ -122,12 +124,20 @@ try {
   context.on('serviceworker', value => report.workerEvents.push({ type: 'started', url: value.url(), date: new Date().toISOString() }));
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
   report.browser = context.browser().version(); report.fixtureOrigin = fixtures.origin;
-  await fs.writeFile(manifestPath, manifestText);
-  const extensionManager = await context.newPage(); await extensionManager.goto('chrome://extensions');
-  await extensionManager.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await extensionManager.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await until(async () => { for (const value of context.serviceWorkers()) try { if (new URL(value.url()).hostname === extensionId && await value.evaluate(() => chrome.runtime.getManifest().host_permissions === undefined)) return value; } catch {} }, 'restored worker missing');
-  await extensionManager.close(); assert.deepEqual(await hashDirectory(extension), testedFiles); report.testHarness.testCopyRestored = true;
+  if (bootstrapLoopback) {
+    await fs.writeFile(manifestPath, manifestText);
+    const extensionManager = await context.newPage(); await extensionManager.goto('chrome://extensions');
+    await extensionManager.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
+    await extensionManager.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
+    worker = await until(async () => {
+      for (const candidate of context.serviceWorkers()) {
+        if (new URL(candidate.url()).hostname !== extensionId) continue;
+        try { if (await candidate.evaluate(() => !chrome.runtime.getManifest().host_permissions?.length)) return candidate; } catch {}
+      }
+    }, 'restored worker missing');
+    await extensionManager.close();
+  }
+  assert.deepEqual(await hashDirectory(extension), testedFiles); report.testHarness.testCopyRestored = true;
   shell = await context.newPage(); await shell.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await until(() => shell.locator('#chat-input').isEnabled(), 'sidepanel did not initialize');
   documentId = await shell.evaluate(() => window.__reconnectDocumentId = crypto.randomUUID());

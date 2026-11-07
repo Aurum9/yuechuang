@@ -2,7 +2,7 @@ import { allowedUrl, validateSettings } from './core';
 import { requestCompletion } from './model';
 import { readConfig, secureStorage } from './store';
 import { planChat } from './chat-model';
-import { CHAT_PORT, CHAT_SESSION_KEY, MAX_CHAT_INPUT, MAX_CHAT_MESSAGES, MAX_CHAT_OUTPUT, type ChatCommand, type ChatMessage, type ChatState, type SearchUpdate } from './chat-shared';
+import { CHAT_PORT, CHAT_SESSION_KEY, MAX_CHAT_INPUT, MAX_CHAT_MESSAGES, MAX_CHAT_OUTPUT, chatPageQuote, type ChatCommand, type ChatMessage, type ChatQuoteSource, type ChatReadingEvent, type ChatState, type SearchUpdate } from './chat-shared';
 import { sanitizeChatCitations, sanitizeChatSearch } from './chat-search';
 import { sanitizeChatDetails } from './chat-details';
 import { getChatConnectionView } from './chat-connection';
@@ -22,11 +22,71 @@ let checkpointBlocked = false;
 let configurationReady = async (): Promise<unknown> => undefined;
 let beforeRequest = () => {};
 const ports = new Set<chrome.runtime.Port>();
+const readingWindows = new Map<chrome.runtime.Port, { windowId: number; quoteEnabled: boolean }>();
+const pendingPageQuotes = new Map<number, ChatQuoteSource>();
 function empty(): ChatState { return { type: 'chat:state', messages: [], status: 'idle', hasKey: false, settingsReady: false, connection: 'apiKey', connectionLabel: 'API Key' }; }
 const trusted = (sender?: chrome.runtime.MessageSender) => sender?.id === chrome.runtime.id && sender.url?.split('#')[0] === chrome.runtime.getURL('sidepanel.html') && (sender.frameId === undefined || sender.frameId === 0);
 const hidden = (value: string, key: string) => key ? value.replaceAll(key, '[Key 已隐藏]') : value;
 function errorText(error: unknown, key = '') { return hidden(error instanceof Error ? error.message.replaceAll('摘要', '回答') : '对话操作失败，请手动重试。', key); }
 function emit() { for (const port of ports) { try { port.postMessage(state); } catch { /* Closing panels cannot receive updates. */ } } }
+function emitReadingEvent(windowId: number, event: ChatReadingEvent): void {
+  for (const [port, target] of readingWindows) {
+    if (target.windowId !== windowId || event.type === 'chat:page-quote' && !target.quoteEnabled) continue;
+    try { port.postMessage(event); } catch { /* A closed side panel has no recipient. */ }
+  }
+}
+async function currentQuoteSource(source: ChatQuoteSource): Promise<boolean> {
+  try {
+    const [tab, frame] = await Promise.all([
+      chrome.tabs.get(source.tabId),
+      chrome.webNavigation.getFrame({ tabId: source.tabId, frameId: source.frameId })
+    ]);
+    return tab.active && tab.windowId === source.windowId && !!frame && !frame.errorOccurred &&
+      frame.documentLifecycle === 'active' && frame.documentId === source.documentId && frame.url === source.url;
+  } catch { return false; }
+}
+
+export async function stageChatPageQuote(source: ChatQuoteSource, text: string): Promise<void> {
+  const { windowId } = source;
+  if (![...readingWindows.values()].some(target => target.windowId === windowId && target.quoteEnabled)) return;
+  pendingPageQuotes.set(windowId, source);
+  const valid = await currentQuoteSource(source);
+  if (pendingPageQuotes.get(windowId) !== source) return;
+  pendingPageQuotes.delete(windowId);
+  if (valid) emitReadingEvent(windowId, { type: 'chat:page-quote', source, text: chatPageQuote(text) });
+}
+
+export async function appendReadingTurn(source: ChatQuoteSource, requestId: string, prompt: string, answer: string, selection: string): Promise<void> {
+  await ensureReady();
+  const { key } = await readConfig();
+  if (job) throw new Error('侧栏正在回答，请等当前回答结束后再追问。');
+  if (checkpointBlocked) throw new Error('无法读取侧栏会话，请先清空会话。');
+  const userId = `reading-${requestId}`;
+  if (!state.messages.some(item => item.id === userId)) {
+    // Reserve room for the actual follow-up question and its answer.
+    if (state.messages.length + 4 > MAX_CHAT_MESSAGES) throw new Error('侧栏会话剩余空间不足，请先新建对话。');
+    const previous = state;
+    const savedRevision = ++revision;
+    const bounded = (value: string, max: number) => value.length > max ? value.slice(0, max - 1) + '…' : value;
+    state = { ...state, status: 'idle', requestId: userId, messages: [
+      ...state.messages,
+      { id: userId, role: 'user', content: bounded(hidden(prompt, key), MAX_CHAT_INPUT), status: 'done' },
+      { id: `${userId}-answer`, role: 'assistant', content: bounded(hidden(answer, key), MAX_CHAT_OUTPUT), status: 'done' }
+    ] };
+    delete state.error;
+    try { await persist(); }
+    catch {
+      if (revision === savedRevision) { state = previous; emit(); }
+      throw new Error('无法保存追问上下文，请重试。');
+    }
+    emit();
+  } else {
+    // A second click may arrive while the first import is being checkpointed.
+    await writes;
+  }
+  if (!state.messages.some(item => item.id === userId)) throw new Error('追问上下文已清除，请重试。');
+  emitReadingEvent(source.windowId, { type: 'chat:follow-up-ready', source, quote: chatPageQuote(selection) });
+}
 function current(active: Job) { if (job !== active || active.controller.signal.aborted || !ports.has(active.owner)) throw new DOMException('Aborted', 'AbortError'); }
 function safeMessage(item: ChatMessage): ChatMessage {
   const message: ChatMessage = { id: item.id, role: item.role, content: item.content, status: item.status };
@@ -116,7 +176,7 @@ export function cancelChat(reason = '已停止生成，已收到的片段保留�
   void persist().catch(() => { if (revision === savedRevision) { state.error = '已停止生成，但无法保存会话进度。请检查扩展存储。'; emit(); } });
 }
 
-async function send(port: chrome.runtime.Port, input: unknown): Promise<void> {
+async function send(port: chrome.runtime.Port, input: unknown, quoteSource?: ChatQuoteSource): Promise<void> {
   if (job || !ports.has(port)) return;
   if (checkpointBlocked) { state.status = 'error'; state.error = '无法读取之前的会话，请先清空会话后继续。本次没有调用模型。'; emit(); return; }
   const active: Job = { id: crypto.randomUUID(), owner: port, controller: new AbortController(), key: '' };
@@ -128,15 +188,17 @@ async function send(port: chrome.runtime.Port, input: unknown): Promise<void> {
     const view = await getChatConnectionView(); current(active); active.connection = view.config.provider;
     if (view.config.provider === 'chatgptOAuth') {
       applySiwc(await ensureSiwcReady()); current(active);
-      if (!state.settingsReady) throw new Error(state.siwcStatus?.error || (state.siwcStatus?.state === 'ready' ? '请在设置中选择当前账号可用的模型并保存。' : '请到设置登录 ChatGPT 并授权套餐用量。'));
+      if (!state.settingsReady) throw new Error(state.siwcStatus?.error || (state.siwcStatus?.state === 'ready' ? '请在设置中选择当前账号可用的模型。选择后会自动保存。' : '请到设置登录 ChatGPT 并授权套餐用量。'));
     } else {
       applyApiKey(key);
       if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置中填写接口地址、模型和 API Key。');
       validateSettings(settings);
       state.settingsReady = await chrome.permissions.contains({ origins: [allowedUrl(settings.baseUrl).origin + '/*'] }); current(active);
-      if (!state.settingsReady) throw new Error('模型接口尚未授权，请在设置中授权接口域名。');
+      if (!state.settingsReady) throw new Error('模型接口尚未授权，请在 Chrome 的扩展详情中检查网站访问权限。');
     }
     if (typeof input === 'string' && key && input.includes(key)) throw new Error('请勿在对话中发送当前配置的 API Key。本次没有调用模型。');
+    if (quoteSource !== undefined && !await currentQuoteSource(quoteSource)) throw new Error('网页引用已失效，请重新选中文字后发送。');
+    current(active);
     const plan = planChat(settings, state.messages, input, view.config.provider);
     const user: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: plan.text, status: 'done' };
     active.assistant = { id: crypto.randomUUID(), role: 'assistant', content: '', status: 'running' };
@@ -211,13 +273,22 @@ export function initializeChat(options: { configurationReady?: () => Promise<unk
       if (port.name !== CHAT_PORT) return;
       if (!trusted(port.sender)) { port.disconnect(); return; }
       ports.add(port);
-      port.onDisconnect.addListener(() => { ports.delete(port); if (job?.owner === port) cancelChat('侧边栏已关闭，生成已停止。'); });
+      port.onDisconnect.addListener(() => {
+        ports.delete(port); readingWindows.delete(port);
+        if (job?.owner === port) cancelChat('侧边栏已关闭，生成已停止。');
+      });
       port.onMessage.addListener((command: ChatCommand) => {
         if (!command || typeof command !== 'object' || !ports.has(port)) return;
+        if (command.type === 'chat:reading-window') {
+          if (Number.isInteger(command.windowId) && command.windowId >= 0 && typeof command.quoteEnabled === 'boolean') {
+            readingWindows.set(port, { windowId: command.windowId, quoteEnabled: command.quoteEnabled });
+          }
+          return;
+        }
         void (async () => {
           await ensureReady(); if (!ports.has(port)) return;
           if (command.type === 'chat:status') { await refresh(); if (ports.has(port)) emit(); }
-          else if (command.type === 'chat:send') await send(port, command.text);
+          else if (command.type === 'chat:send') await send(port, command.text, command.quoteSource);
           else if (command.type === 'chat:stop' && typeof command.requestId === 'string' && command.requestId === job?.id) cancelChat();
           else if (command.type === 'chat:clear' && (command.requestId === undefined || typeof command.requestId === 'string')) await clear(command.requestId);
         })().catch(() => { /* State changes report their own errors; a closed Port has no recipient. */ });

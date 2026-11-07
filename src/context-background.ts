@@ -1,19 +1,24 @@
 import { allowedUrl } from './core';
 import { generateContextAnswer, planContextRequest, validateContextSnapshot } from './context-model';
 import {
-  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PORT, MAX_CONTEXT_SELECTION,
+  CONTEXT_MENU_EXPLAIN, CONTEXT_MENU_TRANSLATE, CONTEXT_PANEL_PIN, CONTEXT_PORT, HIDDEN_TOOLBAR_SITES, MAX_CONTEXT_SELECTION,
   detailsEligibility, normalizeContextSelection, type ContextAnswerKind, type ContextMode, type ContextShowMessage,
-  type ContextSnapshot, type ContextState, type ContextSelectionStartMessage, type ContextSelectionDismissMessage
+  type ContextPanelPin, type ContextSnapshot, type ContextState, type ContextSelectionStartMessage, type ContextSelectionDismissMessage
 } from './context-shared';
-import { readConfig } from './store';
+import { readConfig, secureStorage } from './store';
 import { savePhrase } from './phrases';
 import { getChatConnectionView } from './chat-connection';
 import { requestSiwc } from './siwc-background';
+import { WEB_ACCESS_ORIGINS } from './shared';
+import { trustedPage } from './trusted-page';
+import { appendReadingTurn, stageChatPageQuote } from './chat-background';
+import { MAX_CHAT_QUOTE } from './chat-shared';
 
 interface ContextJob {
   id: string; tabId: number; frameId: number; documentId?: string; url?: string;
   mode: ContextMode; kind: ContextAnswerKind; snapshot?: ContextSnapshot; coreText: string;
   captureId?: string;
+  replacesRequestId?: string;
   controller: AbortController; state: ContextState; shown: boolean; started: boolean;
   port?: chrome.runtime.Port;
 }
@@ -26,6 +31,42 @@ let beforeRequest: (() => void) | undefined;
 let configurationReady: (() => Promise<unknown>) | undefined;
 let onUnavailable: ((reason: string) => void) | undefined;
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重新选择后重试。';
+let toolbarSitesQueue: Promise<unknown> = Promise.resolve();
+let panelPinQueue: Promise<unknown> = Promise.resolve();
+
+function validPanelPin(pin: unknown): pin is ContextPanelPin {
+  if (!pin || typeof pin !== 'object' || !('left' in pin) || !('top' in pin)) return false;
+  return [pin.left, pin.top].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0) &&
+    ['width', 'height'].every(key => {
+      const value = (pin as Record<string, unknown>)[key];
+      return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value > 0);
+    });
+}
+
+async function hiddenToolbarSites(): Promise<string[]> {
+  await secureStorage;
+  const stored = (await chrome.storage.local.get(HIDDEN_TOOLBAR_SITES))[HIDDEN_TOOLBAR_SITES];
+  return Array.isArray(stored) ? stored.filter(site => typeof site === 'string') : [];
+}
+
+function setToolbarSiteHidden(hostname: string, hidden: boolean): Promise<void> {
+  const next = toolbarSitesQueue.then(async () => {
+    const sites = await hiddenToolbarSites();
+    if (sites.includes(hostname) === hidden) return;
+    const updated = hidden ? [...sites, hostname].sort() : sites.filter(site => site !== hostname);
+    await chrome.storage.local.set({ [HIDDEN_TOOLBAR_SITES]: updated });
+    const tabs = await chrome.tabs.query({}).catch(() => []);
+    for (const tab of tabs) {
+      if (tab.id !== undefined) void chrome.tabs.sendMessage(tab.id, { type: 'context:toolbar-site-changed', hostname }).catch(() => {});
+    }
+  });
+  toolbarSitesQueue = next.catch(() => {});
+  return next;
+}
+
+async function toolbarAllowed(url: string): Promise<boolean> {
+  return !(await hiddenToolbarSites()).includes(new URL(url).hostname);
+}
 
 function current(job: ContextJob) {
   if (jobs.get(job.tabId) !== job || job.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -52,7 +93,7 @@ async function verifyDocument(job: ContextJob) {
   const frame = await chrome.webNavigation.getFrame({ tabId: job.tabId, frameId: job.frameId });
   current(job);
   if (!frame || frame.documentId !== job.documentId || frame.url !== job.url || frame.errorOccurred) throw new Error('网页已导航，请在当前页面重新选择。');
-  if (!(await permitted(frame.url))) throw new Error('缺少当前网页的访问权限，请在阅窗设置中授权后重试。');
+  if (!(await permitted(frame.url))) throw new Error('缺少当前网页的访问权限，请在 Chrome 的扩展详情中检查网站访问权限后重试。');
   current(job);
   return frame;
 }
@@ -75,11 +116,14 @@ function replace(job: ContextJob) {
   jobs.set(job.tabId, job);
 }
 async function show(job: ContextJob, error?: string) {
+  await panelPinQueue;
+  const pin = (await chrome.storage.local.get(CONTEXT_PANEL_PIN).catch(() => ({} as Record<string, unknown>)))[CONTEXT_PANEL_PIN];
   await verifyDocument(job); current(job);
   const result = await chrome.tabs.sendMessage(job.tabId, {
     type: 'context:show', requestId: job.id, mode: job.mode, snapshot: job.snapshot,
     error, expanded: job.kind === 'details', captureId: job.captureId, coreText: job.state.coreText,
-    detailsText: job.state.detailsText, exampleKind: job.state.exampleKind
+    detailsText: job.state.detailsText, exampleKind: job.state.exampleKind,
+    replacesRequestId: job.replacesRequestId, pin: validPanelPin(pin) ? pin : undefined
   } satisfies ContextShowMessage, { documentId: job.documentId! });
   current(job); await verifyDocument(job); current(job);
   if (!result?.ok) throw new Error(result?.message || result?.error || '回答窗口未能显示，请刷新网页后重试。');
@@ -146,6 +190,7 @@ async function startFromSelection(input: ContextSelectionStartMessage, sender: c
   let job: ContextJob | undefined;
   try {
     const source = await authorizedSender(sender);
+    if (!await toolbarAllowed(source.url)) throw new Error('此网站的划词工具条已隐藏。');
     if (pendingSelections.get(tabId) !== pending) throw new DOMException('Aborted', 'AbortError');
     job = freshJob(source.tabId, source.frameId, input.mode);
     job.documentId = source.documentId; job.url = source.url; job.captureId = input.captureId;
@@ -190,7 +235,7 @@ async function run(job: ContextJob) {
     const config = await readConfig(); current(job);
     if (connection.provider === 'apiKey') {
       if (!config.settings.baseUrl || !config.settings.model || !config.key) throw new Error('请先在阅窗设置中填写接口、模型和 API Key。');
-      if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在阅窗设置中授权。');
+      if (!(await permitted(config.settings.baseUrl))) throw new Error('缺少模型接口域权限，请在 Chrome 的扩展详情中检查网站访问权限。');
       current(job);
     }
     const plan = planContextRequest(config.settings, job.mode, job.snapshot, job.kind, job.coreText);
@@ -251,6 +296,7 @@ async function rerun(job: ContextJob, details: boolean) {
   const next = freshJob(job.tabId, job.frameId, job.mode, details ? 'details' : job.kind, details ? job.state.coreText : job.coreText);
   next.documentId = job.documentId; next.url = job.url; next.snapshot = job.snapshot;
   next.captureId = job.captureId; next.state.exampleKind = job.state.exampleKind;
+  next.replacesRequestId = job.id;
   next.state.savedId = job.state.savedId;
   replace(next);
   try { await show(next); } catch (error) { await showFailure(next, error); }
@@ -302,6 +348,7 @@ function bindPort(connection: chrome.runtime.Port) {
           const next = freshJob(job.tabId, job.frameId, job.mode, job.kind, job.coreText);
           next.documentId = job.documentId; next.url = job.url; next.snapshot = job.snapshot;
           next.captureId = job.captureId; next.state.exampleKind = job.state.exampleKind;
+          next.replacesRequestId = job.id;
           next.state.savedId = job.state.savedId;
           if (!next.snapshot) return;
           replace(next); await show(next);
@@ -315,7 +362,7 @@ function removeMenu(id: string) {
 }
 function createMenu(id: string, title: string) {
   return new Promise<void>((resolve, reject) => {
-    chrome.contextMenus.create({ id, title, contexts: ['selection'], documentUrlPatterns: ['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*'] }, () => {
+    chrome.contextMenus.create({ id, title, contexts: ['selection'], documentUrlPatterns: [...WEB_ACCESS_ORIGINS] }, () => {
       const error = chrome.runtime.lastError; if (error) reject(new Error(error.message)); else resolve();
     });
   });
@@ -333,8 +380,63 @@ export function initializeContextMenus(options?: { beforeRequest?: () => void; c
     });
     chrome.runtime.onConnect.addListener(bindPort);
     chrome.runtime.onMessage.addListener((input, sender, respond) => {
+      if (input?.type === 'context:follow-up') {
+        const tab = sender.tab;
+        const job = tab?.id === undefined ? undefined : jobs.get(tab.id);
+        if (sender.id !== chrome.runtime.id || tab?.id === undefined || !job || job.id !== input.requestId ||
+            job.frameId !== sender.frameId || job.documentId !== sender.documentId || job.url !== sender.url ||
+            job.state.status !== 'done' || !job.snapshot || !job.state.text.trim()) {
+          respond({ ok: false, error: '查阅结果已失效，请重新查阅后再追问。' }); return;
+        }
+        // Chrome requires the open call to run in the original click's task.
+        const opened = chrome.sidePanel.open({ windowId: tab.windowId });
+        const selection = job.snapshot.text;
+        const prompt = `${job.mode === 'translate' ? '请翻译这段网页选区' : '请结合原文解释这段网页选区'}：\n${selection}`;
+        const answer = job.state.text;
+        const source = { windowId: tab.windowId, tabId: tab.id, frameId: job.frameId, documentId: job.documentId!, url: job.url! };
+        void opened.then(() => appendReadingTurn(source, job.id, prompt, answer, selection))
+          .then(() => respond({ ok: true }), error => respond({ ok: false, error: message(error) }));
+        return true;
+      }
+      if (input?.type === 'context:page-quote') {
+        if (sender.id === chrome.runtime.id && sender.tab?.active && sender.tab.id !== undefined && sender.frameId !== undefined && sender.documentId && sender.url &&
+            /^https?:\/\//u.test(sender.url) && typeof input.url === 'string' && typeof input.text === 'string' && input.text.length <= MAX_CHAT_QUOTE && input.text.trim()) {
+          // The sender URL can retain the original address after history.pushState.
+          // The chat worker checks the selected URL against the live frame.
+          void stageChatPageQuote({ windowId: sender.tab.windowId, tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId, url: input.url }, input.text);
+        }
+        return;
+      }
+      if (input?.type === 'context:panel-pin') {
+        const pin: unknown = input.pin;
+        if (pin !== null && !validPanelPin(pin)) { respond({ ok: false }); return; }
+        const write = panelPinQueue.then(async () => {
+          await authorizedSender(sender);
+          await secureStorage;
+          if (pin === null) await chrome.storage.local.remove(CONTEXT_PANEL_PIN);
+          else {
+            const { left, top, width, height } = pin;
+            await chrome.storage.local.set({ [CONTEXT_PANEL_PIN]: { left, top, width, height } });
+          }
+        });
+        panelPinQueue = write.catch(() => {});
+        void write.then(() => respond({ ok: true }), () => respond({ ok: false }));
+        return true;
+      }
       if (input?.type === 'context:selection-eligible') {
-        void authorizedSender(sender).then(() => respond({ ok: true, enabled: true }), () => respond({ ok: true, enabled: false }));
+        void authorizedSender(sender).then(source => toolbarAllowed(source.url)).then(enabled => respond({ ok: true, enabled }), () => respond({ ok: true, enabled: false }));
+        return true;
+      }
+      if (input?.type === 'context:toolbar-hide-site') {
+        void authorizedSender(sender).then(source => setToolbarSiteHidden(new URL(source.url).hostname, true))
+          .then(() => respond({ ok: true }), error => respond({ ok: false, error: message(error) }));
+        return true;
+      }
+      if (input?.type === 'context:toolbar-sites' || input?.type === 'context:toolbar-restore-site') {
+        if (!trustedPage(sender, 'options.html')) { respond({ ok: false, error: '仅阅窗设置可以管理隐藏网站。' }); return; }
+        const update = input.type === 'context:toolbar-restore-site' && typeof input.hostname === 'string'
+          ? setToolbarSiteHidden(input.hostname, false) : Promise.resolve();
+        void update.then(hiddenToolbarSites).then(sites => respond({ ok: true, sites }), error => respond({ ok: false, error: message(error) }));
         return true;
       }
       if (input?.type === 'context:selection-start') {

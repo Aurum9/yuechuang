@@ -28,7 +28,7 @@
               <h2>想聊点什么？</h2>
               <p class="empty-description">查阅概念、整理思路，<br />或接着一个问题继续问。</p>
               <div class="suggestions" id="chat-suggestions"><button type="button" data-chat-prompt="请用通俗的语言解释：">解释一个概念 <span aria-hidden="true">↗</span></button><button type="button" data-chat-prompt="请帮我梳理以下问题的思路：">帮我梳理思路 <span aria-hidden="true">↗</span></button></div>
-              <p class="context-note">对话仅包含你输入的内容，不会自动读取网页。</p>
+              <p class="context-note">选中网页文字可加入引用。引用随问题一起发送。</p>
             </div>
             <div class="chat-setup" id="chat-setup" hidden><span class="setup-symbol" aria-hidden="true">↗</span><div><h2 id="chat-setup-heading">先连接你的模型</h2><p id="chat-setup-text">在设置中填写接口、模型和 Key，即可开始对话。</p><button type="button" class="inline-button" data-navigate="settings">前往设置 <span aria-hidden="true">→</span></button></div></div>
             <div id="chat-messages" class="chat-messages" aria-label="对话消息" role="log" aria-relevant="additions" aria-live="off"></div>
@@ -36,6 +36,10 @@
           <div class="composer-region">
             <p id="chat-feedback" class="chat-feedback" role="status" aria-live="polite" hidden></p>
             <form id="chat-form" class="chat-form">
+              <div id="chat-page-quote" class="chat-page-quote" hidden>
+                <div><strong>网页选区</strong><blockquote id="chat-page-quote-text"></blockquote></div>
+                <button type="button" id="chat-page-quote-remove" aria-label="移除网页引用" title="移除网页引用">×</button>
+              </div>
               <label for="chat-input" class="visually-hidden">输入消息</label>
               <textarea id="chat-input" rows="3" maxlength="6000" placeholder="输入问题，继续对话…" aria-describedby="composer-help" spellcheck="false"></textarea>
               <div class="composer-tools"><span id="chat-input-count">0 / 6,000</span><button type="button" id="chat-stop" class="stop-button" hidden><span aria-hidden="true">■</span> 停止生成</button><button type="submit" id="chat-send" class="send-button" disabled>发送 <span aria-hidden="true">↑</span></button></div>

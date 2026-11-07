@@ -1,8 +1,9 @@
 import './options.css';
 import './panel-embed';
 import { DEFAULT_SETTINGS, type Settings, type SettingsView } from './shared';
-import type { ChatConnectionConfig, ChatConnectionView } from './chat-connection-shared';
-import { SIWC_API_ORIGIN, SIWC_AUTH_ORIGINS, siwcStatusText, type SiwcView } from './siwc-shared';
+import { HIDDEN_TOOLBAR_SITES } from './context-shared';
+import { CHAT_CONNECTION_CONFIG_KEY, type ChatConnectionConfig, type ChatConnectionView } from './chat-connection-shared';
+import { SIWC_API_ORIGIN, siwcStatusText, type SiwcView } from './siwc-shared';
 import { formatSiwcDiagnostics, siwcDiagnosticText } from './siwc-diagnostics';
 
 type Response = { ok: true; [key: string]: unknown } | { ok: false; error: string };
@@ -25,7 +26,6 @@ const feedback = element<HTMLDivElement>('feedback');
 const saveState = element<HTMLSpanElement>('save-state');
 const testButton = element<HTMLButtonElement>('test-connection');
 const keyClearButton = element<HTMLButtonElement>('clear-key');
-const permissionInput = element<HTMLInputElement>('permission-origin');
 document.querySelector<HTMLAnchorElement>('.brand')?.addEventListener('click', event => {
   event.preventDefault();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -110,38 +110,33 @@ function updateDirty(): void {
   saveState.classList.toggle('is-dirty', dirty);
 }
 
-function renderPermissions(origins: string[]): void {
-  const list = element<HTMLUListElement>('permission-list');
+async function refreshHiddenToolbarSites(): Promise<void> {
+  const { sites } = await message('context:toolbar-sites');
+  const list = element<HTMLUListElement>('hidden-toolbar-sites');
   list.replaceChildren();
-  const sorted = [...origins].sort();
-  element('permission-count').textContent = `${sorted.length} 条`;
-  const broadHttps = origins.includes('https://*/*');
-  element('permission-status').textContent = broadHttps ? 'HTTPS 网页访问已启用' : origins.length ? '已按域授权，请确认来源页、目标页及接口均已覆盖' : '尚未授权；授权后可识别链接拖动并读取正文';
-  element('permission-dot').classList.toggle('is-enabled', origins.length > 0);
-  element<HTMLButtonElement>('grant-https').textContent = broadHttps ? 'HTTPS 访问已授权' : '启用 HTTPS 网页访问';
-  if (!sorted.length) {
+  if (!Array.isArray(sites) || !sites.length) {
     const empty = document.createElement('li');
     empty.className = 'permission-empty';
-    empty.textContent = '暂无网站授权';
+    empty.textContent = '暂无隐藏的网站';
     list.append(empty);
+    return;
   }
-  for (const origin of sorted) {
+  for (const hostname of sites as string[]) {
     const item = document.createElement('li');
     const label = document.createElement('span');
-    label.textContent = origin;
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove-permission';
-    remove.textContent = '撤销';
-    remove.setAttribute('aria-label', `撤销 ${origin} 的访问权限`);
-    remove.addEventListener('click', () => {
+    label.textContent = hostname;
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'remove-permission';
+    restore.textContent = '恢复显示';
+    restore.setAttribute('aria-label', `恢复在 ${hostname} 显示划词工具条`);
+    restore.addEventListener('click', () => {
       void perform(async () => {
-        const removed = await chrome.permissions.remove({ origins: [origin] });
-        await refresh(false);
-        report(removed ? `已撤销 ${origin} 的访问权限，相关摘要任务将停止。` : '该权限未被移除，请检查浏览器扩展权限设置。', removed ? 'success' : 'error');
+        await message('context:toolbar-restore-site', { hostname });
+        await refreshHiddenToolbarSites();
       });
     });
-    item.append(label, remove);
+    item.append(label, restore);
     list.append(item);
   }
 }
@@ -167,7 +162,6 @@ async function refresh(replaceForm: boolean): Promise<SettingsView> {
   const warning = element<HTMLDivElement>('storage-warning');
   warning.textContent = view.warning || '';
   warning.hidden = !view.warning;
-  renderPermissions(view.permissions);
   updateEndpoint();
   updateDirty();
   return view;
@@ -201,7 +195,7 @@ function connectionDirty(): boolean {
   if (!connectionView) return false;
   const current = selectedConnection();
   return current.provider !== connectionView.config.provider
-    || current.provider === 'chatgptOAuth' && current.model !== connectionView.config.model;
+    || current.provider === 'chatgptOAuth' && current.model !== '' && current.model !== connectionView.config.model;
 }
 
 function connectionReport(text: string, error = false): void {
@@ -215,9 +209,10 @@ function updateConnectionControls(): void {
   const isOAuth = selectedProvider() === 'chatgptOAuth';
   const disabled = busy || connectionBusy || !connectionLoaded;
   element('siwc-details').hidden = !isOAuth;
+  element('connection-save-actions').hidden = isOAuth;
   apiConnection.disabled = disabled;
   oauthConnection.disabled = disabled;
-  oauthModel.disabled = disabled || !siwcView?.status.planAuthorized || !siwcView.status.models.length;
+  oauthModel.disabled = disabled || siwcView?.status.state !== 'ready' || !!siwcView.status.loginPending || !siwcView.status.models.length;
   element<HTMLButtonElement>('save-connection').disabled = disabled;
   for (const id of ['siwc-login', 'siwc-refresh', 'siwc-new-account']) element<HTMLButtonElement>(id).disabled = disabled;
   element<HTMLButtonElement>('siwc-logout').disabled = disabled || !siwcView?.status.loggedIn;
@@ -238,7 +233,7 @@ function renderConnection(view: ChatConnectionView, replaceChoice: boolean): voi
   if (replaceChoice) {
     apiConnection.checked = view.config.provider === 'apiKey';
     oauthConnection.checked = view.config.provider === 'chatgptOAuth';
-    if (siwcView) renderOAuthModels(siwcView, true);
+    if (siwcView) renderOAuthModels({ ...siwcView, config: view.config });
   }
   if (view.migration === 'webModeRemoved' && !migrationNotified) {
     migrationNotified = true;
@@ -247,11 +242,8 @@ function renderConnection(view: ChatConnectionView, replaceChoice: boolean): voi
   updateConnectionControls();
 }
 
-function renderOAuthModels(view: SiwcView, replaceChoice: boolean): void {
-  const previousModel = oauthModel.value;
-  const savedConfig = connectionView?.config ?? view.config;
-  const savedModel = savedConfig.provider === 'chatgptOAuth' ? savedConfig.model : '';
-  const wanted = replaceChoice ? savedModel : previousModel || savedModel;
+function renderOAuthModels(view: SiwcView): void {
+  const savedModel = view.config.provider === 'chatgptOAuth' ? view.config.model : '';
   oauthModel.replaceChildren();
   for (const model of view.status.models) {
     const option = document.createElement('option');
@@ -259,20 +251,23 @@ function renderOAuthModels(view: SiwcView, replaceChoice: boolean): void {
     option.textContent = model.label;
     oauthModel.append(option);
   }
-  if (view.status.models.some(model => model.id === wanted)) oauthModel.value = wanted;
-  if (!view.status.models.length || wanted && !view.status.models.some(model => model.id === wanted)) {
+  if (view.status.models.some(model => model.id === savedModel)) {
+    oauthModel.value = savedModel;
+  } else {
     const option = document.createElement('option');
-    option.value = wanted;
-    option.textContent = option.value ? `已保存：${option.value}（请刷新确认）` : '授权套餐用量后选择可用模型';
-    oauthModel.append(option);
-    oauthModel.value = wanted;
+    option.value = '';
+    option.disabled = true;
+    option.textContent = view.status.models.length ? '请选择模型以启用订阅连接'
+      : savedModel ? `已保存：${savedModel}（请刷新确认）` : '授权套餐用量后选择可用模型';
+    oauthModel.prepend(option);
+    oauthModel.value = '';
   }
 }
 
-function renderSiwc(view: SiwcView, replaceChoice: boolean): void {
+function renderSiwc(view: SiwcView): void {
   ++siwcReadVersion;
   siwcView = view;
-  renderOAuthModels(view, replaceChoice);
+  renderOAuthModels(view);
   element('siwc-status').textContent = view.status.loginPending ? '等待 OpenAI 官方页面完成授权' : siwcStatusText(view.status);
   element('siwc-identity').textContent = view.status.loggedIn ? '已登录' : '尚未登录';
   element('siwc-entitlement').textContent = view.status.planAuthorized ? '已授权' : view.status.loggedIn ? '尚未授权，请重新登录并允许套餐用量' : '尚未授权';
@@ -313,24 +308,35 @@ async function performConnection(action: () => Promise<void>): Promise<void> {
   finally { connectionBusy = false; updateConnectionControls(); }
 }
 
-connectionForm.addEventListener('change', () => {
+function renderSavedSubscription(view: SiwcView): void {
+  renderConnection({ config: view.config }, true);
+  renderSiwc(view);
+  notifyConnectionChanged();
+  connectionReport('已自动保存 ChatGPT 订阅连接。侧栏对话和划词查阅使用所选模型。');
+}
+
+connectionForm.addEventListener('change', event => {
   ++connectionEditVersion;
   connectionReport('');
   updateConnectionControls();
+  const initial = siwcView;
+  const config = connectionView?.config;
+  if (selectedProvider() !== 'chatgptOAuth' || !config || initial?.status.state !== 'ready' || initial.status.loginPending || !connectionDirty()) return;
+  const selectedModel = event.target === oauthModel ? oauthModel.value : '';
+  void performConnection(async () => {
+    const view = initial.status.models.length ? { ...initial, config } : await siwcMessage('siwc:refresh');
+    renderSiwc(view);
+    if (view.status.state !== 'ready' || view.status.loginPending) return;
+    const model = selectedModel || view.status.models[0]?.id;
+    if (!model || view.config.provider === 'chatgptOAuth' && view.config.model === model) return;
+    renderSavedSubscription(await siwcMessage('siwc:save', { config: { provider: 'chatgptOAuth', model } }));
+  });
 });
 connectionForm.addEventListener('submit', event => {
   event.preventDefault();
+  if (selectedProvider() !== 'apiKey') return;
   void performConnection(async () => {
     const config = selectedConnection();
-    if (config.provider === 'chatgptOAuth') {
-      if (!siwcView?.status.planAuthorized || !siwcView.status.models.some(model => model.id === config.model)) throw new Error('请先完成官方登录并授权套餐用量，刷新并选择可用模型后保存。');
-      const view = await siwcMessage('siwc:save', { config });
-      renderConnection({ config: view.config }, true);
-      renderSiwc(view, true);
-      notifyConnectionChanged();
-      connectionReport('已保存 ChatGPT 订阅连接。侧栏对话和划词查阅使用所选模型。切换连接会停止正在生成的回答。');
-      return;
-    }
     const view = await connectionMessage('connection:save', { config });
     renderConnection(view, true);
     notifyConnectionChanged();
@@ -340,19 +346,20 @@ connectionForm.addEventListener('submit', event => {
 
 function requestSiwc(type: 'siwc:login' | 'siwc:refresh', newAccount = false): void {
   if (busy || connectionBusy || !connectionLoaded) return;
-  // Keep the optional API permission request inside the trusted button gesture.
-  const grant = chrome.permissions.request({ origins: [...SIWC_AUTH_ORIGINS] });
   void performConnection(async () => {
-    if (!await grant) throw new Error('尚未获得 OpenAI 登录、API 和本机登录回调权限。请再次点击并授权。');
     siwcAuthorizing = type === 'siwc:login';
     updateConnectionControls();
     connectionReport(type === 'siwc:login' ? '请在打开的 OpenAI 页面完成登录，并授权套餐用量。完成后会返回这里，尚未发送聊天问题。' : '正在检查登录授权和可用模型…');
     try {
       const view = await siwcMessage(type, newAccount ? { newAccount: true } : {});
-      renderSiwc(view, false);
-      notifyConnectionChanged();
-      if (view.status.state === 'ready' && view.status.planAuthorized) connectionReport('已获得套餐用量授权和可用模型。选择模型并保存，再到「对话」验证。尚未发送聊天问题。');
-      else connectionReport(siwcStatusText(view.status), true);
+      if (type === 'siwc:login' && view.status.state === 'ready' && view.config.provider === 'chatgptOAuth' && view.status.models.some(model => model.id === view.config.model)) {
+        renderSavedSubscription(view);
+      } else {
+        renderConnection({ config: view.config }, false);
+        renderSiwc(view);
+        notifyConnectionChanged();
+        connectionReport(siwcStatusText(view.status), view.status.state !== 'ready');
+      }
     } finally { siwcAuthorizing = false; }
   });
 }
@@ -371,7 +378,7 @@ element('siwc-cancel').addEventListener('click', () => {
   siwcCancelling = true;
   updateConnectionControls();
   void siwcMessage('siwc:cancel').then(view => {
-    renderSiwc(view, false);
+    renderSiwc(view);
     notifyConnectionChanged();
     connectionReport('已取消本次登录。可以关闭尚未完成授权的登录页面。');
   }).catch(error => connectionReport(error instanceof Error ? error.message : '取消登录失败，请重试。', true)).finally(() => {
@@ -388,7 +395,7 @@ element('siwc-logout').addEventListener('click', () => {
       connectionReport(`${error instanceof Error ? error.message : '退出账号操作未完成。'}尚未确认本机凭证已清除，请检查扩展存储后重试。`, true);
       return;
     }
-    renderSiwc(view, false);
+    renderSiwc(view);
     notifyConnectionChanged();
     if (view.status.state !== 'signedOut') {
       connectionReport(`${view.status.error || siwcStatusText(view.status)}。尚未确认本机凭证已清除，请检查扩展存储后重试。`, true);
@@ -445,35 +452,6 @@ testButton.addEventListener('click', () => {
   });
 });
 
-function requestOrigins(origins: string[]): void {
-  if (busy) return;
-  // Call request synchronously from the click handler to retain Chrome's user gesture.
-  const request = chrome.permissions.request({ origins });
-  void perform(async () => {
-    const granted = await request;
-    await refresh(false);
-    report(granted ? '访问权限已授予。若网页尚未出现预览投放区，请刷新该网页。' : '授权未完成。你可以稍后再试，或仅授权指定的域。', granted ? 'success' : 'info');
-  });
-}
-
-element('grant-https').addEventListener('click', () => requestOrigins(['https://*/*']));
-element('grant-local').addEventListener('click', () => requestOrigins(['http://localhost/*', 'http://127.0.0.1/*']));
-element('grant-origin').addEventListener('click', () => {
-  try {
-    let url: URL;
-    try { url = new URL(permissionInput.value.trim()); }
-    catch { throw new Error('请输入完整的网站地址，如 https://example.com。'); }
-    if (url.username || url.password) throw new Error('网站地址请勿包含账号或密码。');
-    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) {
-      throw new Error('只能授权 HTTPS 网站，或 localhost / 127.0.0.1 的 HTTP 地址。');
-    }
-    requestOrigins([`${url.protocol}//${url.hostname}/*`]);
-  } catch (error) {
-    report(error instanceof Error ? error.message : '请输入完整的网站地址，如 https://example.com。', 'error');
-    permissionInput.focus();
-  }
-});
-
 element('clear-cache').addEventListener('click', () => {
   void perform(async () => {
     await message('settings:clear-cache');
@@ -510,13 +488,14 @@ function refreshConnectionStatus(): void {
   refreshConnectionConfig();
   refreshSiwcStatus();
 }
-function refreshConnectionConfig(reportFailure = false): void {
+function refreshConnectionConfig(reportFailure = false, storageChanged = false): void {
   const version = ++connectionReadVersion;
   const editVersion = connectionEditVersion;
   const preserveChoice = connectionDirty();
   void connectionMessage('connection:get').then(view => {
     if (version !== connectionReadVersion) return;
-    renderConnection(view, !preserveChoice && editVersion === connectionEditVersion && !connectionDirty());
+    const updatedSubscription = storageChanged && view.config.provider === 'chatgptOAuth' && selectedProvider() === 'chatgptOAuth';
+    renderConnection(view, editVersion === connectionEditVersion && (updatedSubscription || !preserveChoice && !connectionDirty()));
   }).catch(error => {
     if (!reportFailure || version !== connectionReadVersion) return;
     connectionReport(error instanceof Error ? error.message : '对话连接配置读取失败，请重新加载扩展。', true);
@@ -526,7 +505,7 @@ function refreshConnectionConfig(reportFailure = false): void {
 function refreshSiwcStatus(reportFailure = false): void {
   const version = ++siwcReadVersion;
   void siwcMessage('siwc:get').then(view => {
-    if (version === siwcReadVersion) renderSiwc(view, false);
+    if (version === siwcReadVersion) renderSiwc(view);
   }).catch(error => {
     if (!reportFailure || version !== siwcReadVersion) return;
     element('siwc-failure').textContent = error instanceof Error ? error.message : '官方登录状态读取失败。';
@@ -540,9 +519,18 @@ window.addEventListener('message', event => {
   if (event.data.type === 'reader:connection-state') refreshSiwcStatus();
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshConnectionStatus(); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && HIDDEN_TOOLBAR_SITES in changes) void refreshHiddenToolbarSites().catch(() => {});
+  if (area === 'local' && CHAT_CONNECTION_CONFIG_KEY in changes) {
+    refreshConnectionConfig(false, true);
+    refreshSiwcStatus();
+  }
+});
 chrome.permissions.onAdded.addListener(() => { void refresh(false).catch(() => undefined); refreshConnectionStatus(); });
 chrome.permissions.onRemoved.addListener(() => { void refresh(false).catch(() => undefined); refreshConnectionStatus(); });
 
-void perform(async () => { await refresh(true); });
+void perform(async () => {
+  await Promise.all([refresh(true), refreshHiddenToolbarSites()]);
+});
 refreshConnectionConfig(true);
 refreshSiwcStatus(true);

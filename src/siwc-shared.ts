@@ -41,7 +41,7 @@ export function siwcStatusText(status: SiwcStatus): string {
   const labels: Record<Exclude<SiwcState, 'ready'>, string> = {
     unchecked: '尚未检查 ChatGPT 授权', signedOut: '尚未登录 ChatGPT',
     planDenied: '身份已验证，尚未授权套餐用量', reauthRequired: '授权已失效，请重新登录',
-    permissionRequired: '请授权访问 OpenAI 官方 API', error: '连接检查失败，请查看提示',
+    permissionRequired: '请检查 Chrome 的网站访问权限', error: '连接检查失败，请查看提示',
   };
   return labels[status.state];
 }

@@ -45,7 +45,7 @@ const report = {
     toolbarTrustedMouseOrKeyboard: true, toolbarSyntheticClickRejected: false,
     nativeMenuCallbackInstrumented: false, trustedNativeContextMenuEvent: false,
     productionSourceModified: false, testCopyRestored: false,
-    permissionBootstrap: 'Temporary test-copy manifest grants loopback, followed by production manifest restoration and extension reload.'
+    permissionBootstrap: 'Website access is declared in the production manifest and is active in a fresh profile.'
   },
   coverage: { automaticToolbarZeroRequests: false, oneClickTranslation: false, mainAndPreviewFrames: false, bilingualPairs: false, usageExamples: false, longTranslationNoExamples: false, selectionLifecycle: false, m1DragSmoke: false },
   notes: [
@@ -62,7 +62,7 @@ assertTestDirectory(profile);
 const testExtension = path.join(profile, 'test-extension');
 assertTestDirectory(testExtension);
 const fakeKey = 'm2-local-mock-key-do-not-use-with-real-service';
-let context, options, source, worker, extensionId, fatal, productionBackground, manifestPath, backgroundPath, nativeProfile;
+let context, options, source, worker, extensionId, fatal, productionBackground, backgroundPath, nativeProfile;
 const host = frame => frame.locator('local-reader-context');
 const toolbar = frame => frame.locator('local-reader-selection-toolbar');
 const tool = (frame, name) => toolbar(frame).locator(`[data-selection-action="${name}"]`);
@@ -105,15 +105,16 @@ async function gotoContext(foreign = false) {
 }
 async function selected(frame) { return frame.evaluate(() => getSelection()?.toString() || ''); }
 async function realSelect(frame, selector, { paragraph = false, keyboard = false, allowEmpty = false } = {}) {
-  await source.bringToFront(); const term = frame.locator(selector); await term.scrollIntoViewIfNeeded();
+  const page = typeof frame.page === 'function' ? frame.page() : frame;
+  await page.bringToFront(); const term = frame.locator(selector); await term.scrollIntoViewIfNeeded();
   // Deliver the scrolling caused by locating an off-screen target before the
   // trusted selection gesture. A late event would correctly dismiss that UI.
   await frame.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const box = await term.boundingBox(); assert.ok(box, 'selectable target missing: ' + selector);
   const x = box.x + Math.min(box.width / 2, 70), y = box.y + Math.min(box.height / 2, 14);
-  if (paragraph) await source.mouse.click(x, y, { clickCount: 3 });
-  else await source.mouse.dblclick(x, y);
-  if (keyboard) { await source.keyboard.press('ArrowLeft'); await source.keyboard.press('Control+Shift+ArrowRight'); }
+  if (paragraph) await page.mouse.click(x, y, { clickCount: 3 });
+  else await page.mouse.dblclick(x, y);
+  if (keyboard) { await page.keyboard.press('ArrowLeft'); await page.keyboard.press('Control+Shift+ArrowRight'); }
   const text = await selected(frame); if (!allowEmpty) assert.ok(text.trim(), 'real mouse/keyboard did not select text');
   return text;
 }
@@ -158,27 +159,6 @@ async function dragPreview(linkId, expectedPath) {
   await until(async () => await source.locator('local-reader-preview .page-status').getAttribute('data-state') === 'ready', 'M1 target frame not ready', 18000);
   const handle = await source.locator('local-reader-preview iframe').elementHandle(); const frame = await handle.contentFrame(); assert.ok(frame); return frame;
 }
-async function reloadTestCopy({ nativeHarness = false, grantLoopback = false } = {}) {
-  const harness = ';(()=>{const handlers=[];globalThis.__contextE2EHandlers=handlers;const add=chrome.contextMenus.onClicked.addListener.bind(chrome.contextMenus.onClicked);chrome.contextMenus.onClicked.addListener=(listener)=>{handlers.push(listener);add(listener)};globalThis.__contextE2EDispatch=(info,tab)=>{for(const listener of handlers)listener(info,tab);return handlers.length}})();\n';
-  await fs.writeFile(backgroundPath, nativeHarness ? harness + productionBackground : productionBackground);
-  await fs.writeFile(manifestPath, grantLoopback ? JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }) : productionManifest);
-  const browserSettings = await context.newPage(); await browserSettings.goto('chrome://extensions');
-  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await browserSettings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await until(async () => {
-    for (const candidate of context.serviceWorkers()) {
-      try {
-        if (new URL(candidate.url()).hostname !== extensionId) continue;
-        const ready = await candidate.evaluate(instrumented => instrumented ? globalThis.__contextE2EHandlers?.length > 0 : typeof globalThis.__contextE2EDispatch === 'undefined', nativeHarness);
-        if (ready) return candidate;
-      } catch {}
-    }
-  }, 'reloaded worker unavailable');
-  await fs.writeFile(manifestPath, productionManifest); await fs.writeFile(backgroundPath, productionBackground);
-  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
-  await browserSettings.close();
-  if (!nativeHarness && grantLoopback) await reloadTestCopy();
-}
 async function nativeInvoke(frame, selector, mode = 'explain', { clearAfterMenu = false, textOverride } = {}) {
   await source.bringToFront();
   await frame.evaluate(() => {
@@ -199,27 +179,20 @@ async function nativeInvoke(frame, selector, mode = 'explain', { clearAfterMenu 
 }
 
 try {
-  context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${path.join(root, 'dist')}`, `--load-extension=${path.join(root, 'dist')}`, '--no-first-run'] });
-  context.setDefaultTimeout(8000); worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
-  report.browser = context.browser().version();
-  options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'initial settings unavailable');
-  source = await context.newPage(); await source.goto(fixtures.origin + '/context-tech');
-  await check('initial optional permission boundary', async () => {
-    assert.deepEqual((await options.evaluate(() => chrome.runtime.sendMessage({ type: 'settings:get' }))).permissions, []);
-    await realSelect(source, '#term-a'); await sleep(200); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
-  });
-  await context.close();
   await fs.cp(path.join(root, 'dist'), testExtension, { recursive: true });
-  manifestPath = path.join(testExtension, 'manifest.json'); backgroundPath = path.join(testExtension, manifest.background.service_worker);
+  backgroundPath = path.join(testExtension, manifest.background.service_worker);
   productionBackground = await fs.readFile(backgroundPath, 'utf8');
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'] });
-  context.setDefaultTimeout(8000); context.on('request', request => { if (request.url().startsWith('http')) report.network.push({ method: request.method(), url: request.url() }); });
+  context.setDefaultTimeout(8000);
+  context.on('request', request => { if (request.url().startsWith('http')) report.network.push({ method: request.method(), url: request.url() }); });
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
-  await reloadTestCopy();
   assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined'); report.testHarness.toolbarUsesProductionWorkerWithoutTestEntry = true; report.testHarness.toolbarFlowProductionWorker = true;
   options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'production settings unavailable');
-  assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*', 'http://localhost/*'] })), true);
+  await check('fresh profile grants HTTP and HTTPS website access without a second prompt', async () => {
+    assert.equal(await options.evaluate(() => chrome.permissions.contains({ origins: ['http://*/*', 'https://*/*'] })), true);
+    assert.equal(await options.getByRole('button', { name: '授权所有网站' }).count(), 0);
+    assert.equal(count(), 0);
+  });
   await settings('normal', fakeKey); source = await context.newPage(); await gotoContext();
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixtures.origin }); report.extensionId = extensionId;
 
@@ -229,7 +202,9 @@ try {
     await source.evaluate(() => getSelection()?.removeAllRanges());
   });
   await check('trusted selection shows compact toolbar with zero API; DOM.click has no effect', async () => {
-    await gotoContext(true); fixtures.reset(); assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
+    await gotoContext(true); fixtures.reset();
+    await source.addStyleTag({ content: 'html > [data-local-reader-root] { visibility: hidden !important; }' });
+    assert.equal((await selectToolbar(source, '#term-foreign')).trim(), 'resilience');
     for (const name of ['translate', 'explain', 'close']) await tool(source, name).evaluate(node => node.click());
     await sleep(200); assert.equal(count(), 0); assert.equal(await host(source).count(), 0); assert.equal(await toolbar(source).isVisible(), true);
     assert.equal((await selected(source)).trim(), 'resilience'); report.testHarness.toolbarSyntheticClickRejected = true;
@@ -237,6 +212,7 @@ try {
   });
   await check('translate click makes exactly one request and preserves the real selection', async () => {
     await clickToolbar(source, 'translate'); assert.match(await completed(source), /CONTEXT_TRANSLATION_OUTPUT/); assert.equal(count(), 1);
+    assert.equal(await panel(source).isVisible(), true);
     assert.equal(latest().contextMode, 'translate'); assert.equal(input().selection.trim(), 'resilience'); assert.equal((await selected(source)).trim(), 'resilience');
     assert.match(prompt(), /完整译|完整翻译/); assert.match(input().paragraphContext, /FOREIGN_NEAR_BEFORE_SENTINEL/); assert.match(input().paragraphContext, /FOREIGN_NEAR_AFTER_SENTINEL/);
     assert.doesNotMatch(JSON.stringify(latest().body), /CONTEXT_FORM_SECRET|CONTEXT_HIDDEN_SECRET|GLOBAL_NAV_NO_CONTEXT_SECRET/);
@@ -261,20 +237,70 @@ try {
   });
   await check('result controls ignore synthetic page clicks', async () => {
     const before = count(), oldId = await panel(source).getAttribute('data-request-id');
-    for (const name of ['retry', 'expand', 'stop', 'close']) await action(source, name).evaluate(node => node.click());
+    for (const name of ['retry', 'expand', 'stop', 'pin', 'close']) await action(source, name).evaluate(node => node.click());
     await sleep(180); assert.equal(count(), before); assert.equal(await panel(source).getAttribute('data-request-id'), oldId); assert.equal(await status(source).getAttribute('data-phase'), 'done');
+    assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
   });
   await check('long paragraph translation sends the complete selection and hides unrelated example action', async () => {
     await gotoContext(true); fixtures.reset(); const text = await selectToolbar(source, '#ctx-long-foreign', { paragraph: true }); assert.ok(text.length > 240);
     await clickToolbar(source, 'translate'); await completed(source); assert.equal(count(), 1); assert.equal(input().selection.trim(), text.trim()); assert.match(input().selection, /LONG_ENGLISH_CONTEXT_SENTINEL/);
     assert.equal(await action(source, 'expand').isVisible(), false); assert.equal(await details(source).isVisible(), false); await panel(source).screenshot({ path: path.join(screenshots, 'translate-long-no-examples.png') });
+    const quote = panel(source).locator('.selection');
+    const result = panel(source).locator('.result');
+    const divider = panel(source).getByRole('separator', { name: '调整原文高度' });
+    const originalHeight = (await quote.boundingBox()).height;
+    const resultHeight = (await result.boundingBox()).height;
+    const panelHeight = (await panel(source).boundingBox()).height;
+    assert.equal((await quote.textContent()).trim(), text.trim());
+    const handle = await divider.boundingBox();
+    await source.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await source.mouse.down();
+    await source.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2 - 32, { steps: 6 });
+    await source.mouse.up();
+    assert.ok((await quote.boundingBox()).height < originalHeight);
+    assert.ok((await result.boundingBox()).height > resultHeight);
+    assert.equal((await panel(source).boundingBox()).height, panelHeight);
+    await divider.focus(); await source.keyboard.press('End');
+    assert.ok((await quote.boundingBox()).height > originalHeight);
+    assert.ok((await result.boundingBox()).height >= 36);
+    assert.equal(count(), 1);
   });
   await check('keyboard selection completion shows toolbar without a request', async () => {
     await gotoContext(); fixtures.reset(); const text = await selectToolbar(source, '#term-a', { keyboard: true }); assert.match(text, /coherence/); assert.equal(count(), 0);
-    await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' }); assert.equal(count(), 0);
+    await source.keyboard.press('Escape'); await toolbar(source).waitFor({ state: 'detached' }); assert.equal(count(), 0);
+  });
+  await check('HTTP toolbar hides until reload or across tabs until the site is restored in settings', async () => {
+    const url = 'http://reading-fixture.test/article';
+    await context.route(url, route => route.fulfill({ contentType: 'text/html', body: '<p>Reading builds <span id="term">coherence</span> through practice.</p>' }));
+    const second = await context.newPage();
+    try {
+      await source.goto(url); fixtures.reset();
+      assert.equal(await source.evaluate(() => isSecureContext), false);
+      await selectToolbar(source, '#term');
+      await tool(source, 'close').click();
+      await tool(source, 'hide-page').click();
+      await toolbar(source).waitFor({ state: 'detached' });
+      await realSelect(source, '#term'); await sleep(180);
+      assert.equal(await toolbar(source).count(), 0);
+
+      await source.reload(); await selectToolbar(source, '#term');
+      await second.goto(url); await selectToolbar(second, '#term');
+      await source.bringToFront();
+      await tool(source, 'close').click(); await tool(source, 'hide-site').click();
+      await toolbar(source).waitFor({ state: 'detached' });
+      await toolbar(second).waitFor({ state: 'detached' });
+      await source.reload(); await realSelect(source, '#term'); await sleep(180);
+      assert.equal(await toolbar(source).count(), 0);
+
+      await options.bringToFront();
+      await options.getByRole('button', { name: '恢复在 reading-fixture.test 显示划词工具条' }).click();
+      await options.getByText('暂无隐藏的网站', { exact: true }).waitFor();
+      await selectToolbar(source, '#term');
+      assert.equal(count(), 0);
+    } finally { await second.close(); }
   });
   await check('close, new selection, blank click and page scroll clear transient UI without requests', async () => {
-    await gotoContext(); fixtures.reset(); await selectToolbar(source, '#term-a'); await tool(source, 'close').click(); await toolbar(source).waitFor({ state: 'detached' });
+    await gotoContext(); fixtures.reset(); await selectToolbar(source, '#term-a'); await source.keyboard.press('Escape'); await toolbar(source).waitFor({ state: 'detached' });
     await selectToolbar(source, '#term-a'); await selectToolbar(source, '#term-b'); assert.equal((await selected(source)).trim(), 'microtasks');
     await source.locator('#ctx-empty').click(); await until(async () => await toolbar(source).count() === 0 && await host(source).count() === 0, 'blank click did not dismiss UI');
     await selectToolbar(source, '#term-a'); await source.evaluate(() => getSelection()?.removeAllRanges()); await until(async () => await toolbar(source).count() === 0, 'disappeared selection left toolbar visible');
@@ -287,15 +313,138 @@ try {
       assert.equal(await toolbar(source).count(), 0, selector); assert.equal(await host(source).count(), 0, selector); assert.equal(count(), 0, selector);
     }
   });
-  await check('selecting the answer itself never opens another toolbar or pays again', async () => {
+  await check('selecting and copying part of the answer keeps it open without another request', async () => {
     await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await completed(source);
-    const box = await core(source).boundingBox(); await source.mouse.dblclick(box.x + 35, box.y + 12); await sleep(180); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
-    await closeAnswer(source);
+    await source.addStyleTag({ content: 'html, body { user-select: none; }' });
+    const box = await core(source).boundingBox();
+    await source.mouse.dblclick(box.x + 80, box.y + 12);
+    const excerpt = await selected(source);
+    assert.ok(excerpt.trim() && (await core(source).innerText()).includes(excerpt) && excerpt !== await core(source).innerText());
+    await source.keyboard.press('ControlOrMeta+c');
+    assert.equal(await source.evaluate(() => navigator.clipboard.readText()), excerpt);
+    await source.evaluate(() => navigator.clipboard.writeText(''));
+    await action(source, 'copy').click();
+    await until(async () => await source.evaluate(() => navigator.clipboard.readText()) === excerpt, 'copy did not use the selected excerpt');
+    assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 1);
+    await core(source).click();
+    assert.equal(await panel(source).isVisible(), true);
+    await source.keyboard.press('Escape'); await host(source).waitFor({ state: 'detached' });
+  });
+  await check('pinned answer survives outside clicks and reopens at the saved position and size until unpinned', async () => {
+    await gotoContext(); fixtures.reset(); await selectAndInvoke(source, '#term-b', 'translate'); await completed(source);
+    const bounds = () => panel(source).boundingBox();
+    const drag = async (x, y, dx, dy) => {
+      await source.mouse.move(x, y); await source.mouse.down();
+      await source.mouse.move(x + dx, y + dy, { steps: 8 }); await source.mouse.up();
+    };
+    const initial = await bounds();
+    await drag(initial.x + 80, initial.y + 20, 120, -90);
+    const moved = await bounds();
+    assert.deepEqual(moved, { ...initial, x: initial.x + 120, y: initial.y - 90 });
+    assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
+    await drag(moved.x + moved.width - 8, moved.y + moved.height - 8, 65, 40);
+    const resized = await bounds();
+    assert.deepEqual(resized, { ...moved, width: moved.width + 65, height: moved.height + 40 });
+    const footer = await panel(source).locator('.foot').boundingBox();
+    assert.ok(Math.abs(resized.y + resized.height - footer.y - footer.height) <= 1, 'button bar must stay at the bottom of the resized panel');
+    await action(source, 'pin').click();
+    try {
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await bounds(), resized);
+      await drag(resized.x + 80, resized.y + 20, 25, 15);
+      const pinnedMoved = await bounds();
+      assert.deepEqual(pinnedMoved, { ...resized, x: resized.x + 25, y: resized.y + 15 });
+      await drag(pinnedMoved.x + 2, pinnedMoved.y + 65, -30, 0);
+      const pinnedAt = await bounds();
+      assert.deepEqual(pinnedAt, { ...pinnedMoved, x: pinnedMoved.x - 30, width: pinnedMoved.width + 30 });
+      await source.mouse.click(1240, 50);
+      await selectToolbar(source, '#term-a');
+      assert.deepEqual(await bounds(), pinnedAt);
+      await clickToolbar(source, 'translate'); await completed(source);
+      assert.deepEqual(await bounds(), pinnedAt);
+      await source.keyboard.press('Escape'); await host(source).waitFor({ state: 'detached' });
+      await gotoContext(); await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await bounds(), pinnedAt);
+      await source.mouse.click(1240, 50);
+      await expand(source);
+      assert.deepEqual(await bounds(), pinnedAt);
+      await closeAnswer(source);
+      await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      await action(source, 'pin').click();
+      assert.equal(await action(source, 'pin').getAttribute('aria-pressed'), 'false');
+      await source.mouse.click(1240, 50); await host(source).waitFor({ state: 'detached' });
+      await until(() => options.evaluate(async () => !(await chrome.storage.local.get('contextPanelPin')).contextPanelPin), 'unpin was not persisted');
+    } finally {
+      await options.evaluate(() => chrome.storage.local.remove('contextPanelPin'));
+    }
   });
   await check('dragging a link never triggers a selection toolbar or model request', async () => {
     await gotoContext(); fixtures.reset(); const link = source.locator('#ctx-drag-link'); await link.scrollIntoViewIfNeeded(); const box = await link.boundingBox();
     await source.mouse.move(box.x + 15, box.y + box.height / 2); await source.mouse.down(); await source.mouse.move(box.x + 110, box.y + box.height / 2 + 22, { steps: 14 }); await source.mouse.up();
     await sleep(300); assert.equal(await toolbar(source).count(), 0); assert.equal(count(), 0);
+  });
+  await check('follow-up imports a reading turn and sends a new page quote with the next question only', async () => {
+    const shell = await context.newPage();
+    try {
+      await shell.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+      const composer = shell.locator('#chat-input');
+      await until(() => composer.isEnabled(), 'side panel chat did not connect');
+      await gotoContext(); fixtures.reset();
+      await selectAndInvoke(source, '#term-a', 'translate'); await completed(source);
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'initial page quote missing');
+      await action(source, 'follow-up').click();
+      const conversation = shell.locator('#chat-messages .chat-message');
+      await until(async () => await conversation.count() === 2, 'follow-up did not import the reading turn');
+      assert.match(await conversation.nth(0).innerText(), /coherence/);
+      assert.match(await conversation.nth(1).innerText(), /CONTEXT_A_OUTPUT/);
+      assert.equal(count(), 1, 'opening a follow-up must not call the model');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+
+      await selectToolbar(source, '#term-b');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'microtasks', 'new page quote missing');
+      assert.equal(count(), 1, 'selecting a quote must not call the model');
+      await composer.fill('这两段有什么关系？');
+      await shell.locator('#chat-send').click();
+      await until(() => count() === 2 && latest().completed, 'follow-up question did not reach the fixture');
+      const turns = latest().body.messages.slice(1);
+      assert.deepEqual(turns.map(turn => turn.role), ['user', 'assistant', 'user']);
+      assert.match(turns[0].content, /coherence/);
+      assert.match(turns[1].content, /CONTEXT_A_OUTPUT/);
+      assert.equal(turns[2].content, '网页选区引用（仅供参考）：\nmicrotasks\n\n我的问题：\n这两段有什么关系？');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+
+      await selectToolbar(source, '#term-b');
+      await shell.locator('#chat-page-quote').waitFor({ state: 'visible' });
+      await composer.fill('保留这条问题草稿');
+      await options.bringToFront();
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      assert.equal(await composer.inputValue(), '保留这条问题草稿');
+
+      await realSelect(source, '#term-a');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'quote missing before same-document navigation');
+      await source.evaluate(() => history.pushState({}, '', '?changed=1'));
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      await realSelect(source, '#term-a');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'coherence', 'quote missing after same-document navigation');
+      await gotoContext(true);
+      await shell.locator('#chat-page-quote').waitFor({ state: 'hidden' });
+      assert.equal(await composer.inputValue(), '保留这条问题草稿');
+
+      await source.evaluate(() => {
+        const paragraph = document.createElement('p');
+        const word = document.createElement('span');
+        word.id = 'short-quote-in-long-paragraph'; word.textContent = 'excerpt';
+        paragraph.append(word, ' long'.repeat(2200));
+        document.querySelector('article').prepend(paragraph);
+      });
+      await realSelect(source, '#short-quote-in-long-paragraph');
+      await until(async () => await shell.locator('#chat-page-quote-text').innerText() === 'excerpt', 'short quote from an oversized paragraph missing');
+      assert.equal(await toolbar(source).count(), 0);
+      assert.equal(count(), 2, 'changing the quote must not send a new request');
+    } finally {
+      await shell.close();
+    }
   });
   await check('consecutive A/B selections cancel delayed A and isolate B output', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'slow A request missing'); const old = latest();
@@ -372,13 +521,15 @@ try {
   });
   await check('permission revocation aborts running selection and prevents a new paid call', async () => {
     await gotoContext(); await settings('slow'); fixtures.reset(); await selectAndInvoke(source, '#term-a'); await until(() => count() === 1, 'request before revoke missing'); const old = latest();
-    await options.evaluate(() => chrome.permissions.remove({ origins: ['http://127.0.0.1/*'] })); await until(() => old.aborted, 'permission revoke did not abort'); await until(async () => await host(source).count() === 0, 'revoked UI remained');
+    const manager = await context.newPage(); await manager.goto('chrome://extensions');
+    await manager.evaluate(extensionId => chrome.developerPrivate.updateExtensionConfiguration({ extensionId, hostAccess: 'ON_CLICK' }), extensionId);
+    await manager.close(); await until(() => old.aborted, 'permission revoke did not abort'); await until(async () => await host(source).count() === 0, 'revoked UI remained');
     await realSelect(source, '#term-b'); await sleep(250); if (await toolbar(source).count()) await tool(source, 'translate').click(); await sleep(250); assert.equal(count(), 1);
     return 'Selection completion after revocation cannot start another model request.';
   });
   await check('production toolbar path leaves storage/network and build boundaries intact', async () => {
     const persisted = await options.evaluate(() => Promise.all([chrome.storage.local.get(null), chrome.storage.sync.get(null)])); assert.ok(!JSON.stringify(persisted).includes(fakeKey)); assert.ok(!JSON.stringify(persisted).includes('CONTEXT_A_NEAR_SENTINEL')); assert.deepEqual(persisted[1], {});
-    assert.ok(report.network.every(request => ['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname))); assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined');
+    assert.ok(report.network.every(request => ['127.0.0.1', 'localhost', 'reading-fixture.test'].includes(new URL(request.url).hostname))); assert.equal(await worker.evaluate(() => typeof globalThis.__contextE2EDispatch), 'undefined');
     assert.deepEqual(await hashDirectory(testExtension), testedFiles); assert.deepEqual(await hashDirectory(path.join(root, 'dist')), testedFiles);
     return { toolbarWorkerTestEntry: false, realModelVerified: false };
   });
@@ -391,13 +542,12 @@ try {
   await context.close();
   const nativeHarness = ';(()=>{const handlers=[];globalThis.__contextE2EHandlers=handlers;const add=chrome.contextMenus.onClicked.addListener.bind(chrome.contextMenus.onClicked);chrome.contextMenus.onClicked.addListener=(listener)=>{handlers.push(listener);add(listener)};globalThis.__contextE2EDispatch=(info,tab)=>{for(const listener of handlers)listener(info,tab);return handlers.length}})();\n';
   await fs.writeFile(backgroundPath, nativeHarness + productionBackground);
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'] }));
   nativeProfile = await fs.mkdtemp(path.join(output, 'context-native-0.9.1-profile-')); assertTestDirectory(nativeProfile);
   context = await chromium.launchPersistentContext(nativeProfile, { channel: 'chromium', headless: process.env.HEADED !== '1', viewport: { width: 1280, height: 900 }, args: [`--disable-extensions-except=${testExtension}`, `--load-extension=${testExtension}`, '--no-first-run'] });
   context.setDefaultTimeout(8000);
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 12000 }); extensionId = new URL(worker.url()).hostname;
   await until(() => worker.evaluate(() => globalThis.__contextE2EHandlers?.length > 0), 'native supplement worker unavailable');
-  await fs.writeFile(manifestPath, productionManifest); await fs.writeFile(backgroundPath, productionBackground);
+  await fs.writeFile(backgroundPath, productionBackground);
   assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true; report.testHarness.nativeMenuCallbackInstrumented = true;
   options = await context.newPage(); await options.goto(`chrome-extension://${extensionId}/options.html`); await until(() => options.locator('#save-settings').isEnabled(), 'native supplement settings unavailable'); await settings('normal', fakeKey); source = await context.newPage();
   await check('native-menu supplement uses a trusted contextmenu snapshot', async () => {
@@ -431,7 +581,7 @@ finally {
     bilingualPairs: passed('short-English expansion has 1–2 actual English/Chinese pairs') && passed('actual preview iframe toolbar translates'),
     usageExamples: passed('technical explanation retains nearby'),
     longTranslationNoExamples: passed('long paragraph translation sends the complete selection'),
-    selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting the answer itself', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
+    selectionLifecycle: ['keyboard selection completion', 'close, new selection, blank click', 'input, password, editable and form', 'selecting and copying part of the answer', 'pinned answer survives outside clicks', 'dragging a link never triggers', 'consecutive A/B selections'].every(passed),
     m1DragSmoke: passed('M1 drag-hover smoke')
   };
   await fs.writeFile(path.join(output, 'context-e2e-report-' + version + '.json'), JSON.stringify(report, null, 2) + '\n');

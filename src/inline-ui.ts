@@ -87,7 +87,7 @@ export function createInlinePanel(actions: Actions) {
   const planBox = el('div', 'plan'); planBox.hidden = true;
   const planText = el('div', 'plan-text'); const confirmRow = el('div', 'confirm');
   const confirm = button('全文分段总结', 'confirm-sections', actions.confirm); confirm.className = 'primary';
-  confirmRow.append(confirm, el('small', '', '将按预计次数调用所配接口')); planBox.append(planText, confirmRow);
+  confirmRow.append(confirm, el('small', '', '将按预计次数调用当前模型')); planBox.append(planText, confirmRow);
   const output = el('div', 'output'); output.setAttribute('data-reader-output', '');
   summaryBody.append(status, coverage, notice, planBox, output); summaryPane.append(summaryHead, summaryBody);
   content.append(locationBar, frameWrap, summaryPane);
@@ -97,7 +97,7 @@ export function createInlinePanel(actions: Actions) {
     try { await navigator.clipboard.writeText(summary); copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制摘要'; }, 1_500); }
     catch { status.textContent = '复制未获允许，可直接选择摘要文字复制。'; }
   }); copy.disabled = true;
-  foot.append(copy, button('在标签页打开', 'open-tab', actions.openTab), button('设置', 'settings', actions.settings), el('span', 'privacy', '正文直连所配接口 · 当前已加载内容'));
+  foot.append(copy, button('在标签页打开', 'open-tab', actions.openTab), button('设置', 'settings', actions.settings), el('span', 'privacy', '摘要使用当前模型连接 · 当前已加载内容'));
   pane.append(head, content, foot); shadow.append(style, scrim, pane); document.documentElement.append(host);
 
   function clearFrame(): void { if (frameTimeout) clearTimeout(frameTimeout); frameTimeout = undefined; frame?.remove(); frame = undefined; placeholder.hidden = false; }

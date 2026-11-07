@@ -18,7 +18,6 @@ const { chromium } = await import('playwright');
 const manifestText = await fs.readFile(path.join(dist, 'manifest.json'), 'utf8'), manifest = JSON.parse(manifestText);
 const files = await hashDirectory(dist);
 const profile = await fs.mkdtemp(path.join(output, 'isolated-profile-')), extension = path.join(profile, 'extension');
-const origins = ['https://auth.openai.com/*', 'https://api.openai.com/*', 'http://127.0.0.1/*'];
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), alg: 'RS256', kid: 'e2e-synthetic', use: 'sig' };
 const report = { version: manifest.version, mockOnly: true, realAccountVerified: false, realModelVerified: false, checks: [], unexpectedNetwork: [], actualWorkerStopVerified: false,
@@ -65,7 +64,8 @@ async function installFixture(target) {
           request.body = body;
           request.authorized = init.headers.Authorization === 'Bearer e2e-synthetic-access';
           const answer = body.instructions?.includes('双语例句') ? 'This product is useful. 这个产品很实用。'
-            : body.instructions?.includes('将选区完整译为') ? '产品' : '纯扩展测试回答';
+            : body.instructions?.includes('将选区完整译为') ? '产品'
+              : body.instructions?.includes('中文摘要') ? '纯扩展测试摘要' : '纯扩展测试回答';
           return new Response([
             { type: 'response.output_text.delta', delta: answer },
             { type: 'response.completed', response: { status: 'completed' } },
@@ -93,9 +93,6 @@ async function approve(page) {
 }
 try {
   await fs.cp(dist, extension, { recursive: true });
-  // Bootstrap optional host permissions in an isolated install, then restore the
-  // exact production manifest before loading the UI or performing any login.
-  await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify({ ...manifest, host_permissions: [...origins, 'https://fixture.example/*'] }));
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true, viewport: { width: 900, height: 900 },
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--no-first-run', '--no-proxy-server', '--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND'] });
   context.setDefaultTimeout(8000);
@@ -106,17 +103,17 @@ try {
       callback.search = new URLSearchParams({ state: url.searchParams.get('state'), code: 'e2e-synthetic-code', client_id: 'oaiapp_synthetic' });
       return route.fulfill({ contentType: 'text/html', body: `<title>Synthetic authorization</title><a id="approve" href="${callback.href.replaceAll('&', '&amp;')}">Approve synthetic account</a>` });
     }
-    if (url.origin === 'https://fixture.example') return route.fulfill({ contentType: 'text/html', body: '<title>Reading fixture</title><p>This <span id="selection-word">product</span> helps the reader.</p>' });
+    if (url.origin === 'https://fixture.example') {
+      const body = url.pathname === '/article'
+        ? '<title>Preview article</title><article><p>' + 'PREVIEW_SUMMARY_FACT: The report describes the results of a reading study and its limitations. '.repeat(8) + '</p></article>'
+        : '<title>Reading fixture</title><p>This <span id="selection-word">product</span> helps the reader.</p><p><a id="article-link" href="/article">Open the full reading study report</a></p>';
+      return route.fulfill({ contentType: 'text/html', body });
+    }
     // A loopback redirect is expected. No real helper or listener is started.
     if (url.origin === 'http://127.0.0.1:1455') return route.abort('connectionrefused');
     report.unexpectedNetwork.push({ origin: url.origin, path: url.pathname }); return route.abort();
   });
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker'); extensionId = new URL(worker.url()).hostname;
-  await fs.writeFile(path.join(extension, 'manifest.json'), manifestText);
-  const manager = await context.newPage(); await manager.goto('chrome://extensions');
-  await manager.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  const prior = worker; await manager.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await currentWorker(prior); await manager.close();
   assert.deepEqual(await hashDirectory(extension), files); report.testedBuild.testCopyRestored = true;
   await installFixture(worker);
   settings = await context.newPage(); await settings.goto(`chrome-extension://${extensionId}/options.html`);
@@ -137,8 +134,9 @@ try {
     await until(async () => (await rpc('siwc:get')).view.status.state === 'ready', 'login did not complete');
     await until(() => page.isClosed(), 'owned auth tab was not closed');
     await until(() => settings.locator('#siwc-model option[value="gpt-synthetic"]').count(), 'model catalog absent');
-    await settings.locator('#siwc-model').selectOption('gpt-synthetic'); await settings.locator('#save-connection').click();
-    assert.equal((await rpc('siwc:get')).view.config.provider, 'chatgptOAuth');
+    await until(async () => (await rpc('siwc:get')).view.config.provider === 'chatgptOAuth', 'subscription was not saved automatically');
+    assert.deepEqual((await rpc('siwc:get')).view.config, { provider: 'chatgptOAuth', model: 'gpt-synthetic' });
+    assert.equal(await settings.locator('#save-connection').isHidden(), true);
   });
   await check('actual content-script context cannot read credential storage or invoke login RPC', async () => {
     const page = await context.newPage(); await page.goto('https://fixture.example/');
@@ -191,8 +189,48 @@ try {
       assert.equal(JSON.parse(requests[1].body.input[0].content).existingCoreAnswer, '产品');
     } finally { await page.close(); }
   });
+  await check('link preview generates and reuses a subscription summary without an API Key', async () => {
+    assert.equal((await rpc('settings:get')).hasKey, false);
+    const before = await worker.evaluate(() => __authFixture.requests.length);
+    const page = await context.newPage();
+    const preview = page.locator('local-reader-preview');
+    const action = name => preview.locator(`[data-reader-action="${name}"]`);
+    try {
+      await page.goto('https://fixture.example/');
+      for (const useCache of [false, true]) {
+        const box = await page.locator('#article-link').boundingBox();
+        assert.ok(box);
+        await page.mouse.move(box.x + 20, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(box.x + 90, box.y + box.height / 2 + 22, { steps: 14 });
+        await preview.waitFor();
+        await page.mouse.up();
+        await preview.locator('.page-status[data-state="ready"]').waitFor();
+        await action('summarize').click();
+        const status = preview.locator('.status[data-phase="done"]');
+        await status.waitFor();
+        assert.equal(await preview.locator('[data-reader-output]').innerText(), '纯扩展测试摘要');
+        assert.equal((await status.innerText()).includes('缓存'), useCache);
+        await action('close').click();
+        await preview.waitFor({ state: 'detached' });
+      }
+      const requests = await worker.evaluate(before => __authFixture.requests.slice(before), before);
+      assert.equal(requests.length, 1);
+      const [request] = requests;
+      assert.equal(request.path, '/v1/responses');
+      assert.equal(request.authorized, true);
+      assert.equal(request.body.model, 'gpt-synthetic');
+      assert.equal(request.body.store, false);
+      assert.equal(request.body.tools, undefined);
+      assert.match(request.body.input[0].content, /PREVIEW_SUMMARY_FACT/);
+    } finally { await page.close(); }
+  });
   await check('real worker termination retains pending PKCE and completes the original callback after restart', async () => {
-    await settings.locator('#siwc-new-account').click(); const page = await authPage(); const nonce = new URL(page.url()).searchParams.get('nonce');
+    await settings.locator('#connection-api').check();
+    await settings.locator('#save-connection').click();
+    await until(async () => (await rpc('siwc:get')).view.config.provider === 'apiKey');
+    await settings.evaluate(() => { void chrome.runtime.sendMessage({ type: 'siwc:login', newAccount: true }).catch(() => {}); });
+    const page = await authPage(); const nonce = new URL(page.url()).searchParams.get('nonce');
     const before = await worker.evaluate(() => chrome.storage.session.get('siwcPendingAuthV1'));
     const version = await until(() => [...versions.values()].filter(v => v.scriptURL === `chrome-extension://${extensionId}/background.js` && v.runningStatus === 'running' && v.status === 'activated').sort((a, b) => Number(b.versionId) - Number(a.versionId))[0]);
     await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId });
@@ -212,7 +250,7 @@ try {
     await worker.evaluate(value => { __authFixture.tokens = value; }, tokens(nonce));
     await page.locator('#approve').click().catch(e => { if (!page.isClosed()) throw e; });
     await until(() => page.isClosed());
-    await until(async () => { const v = (await rpc('siwc:get')).view; return v.status.state === 'ready' && !v.status.loginPending && v.status.models.length > 0; });
+    await until(async () => { const v = (await rpc('siwc:get')).view; return v.status.state === 'ready' && !v.status.loginPending && v.config.provider === 'chatgptOAuth' && v.config.model === 'gpt-synthetic'; });
     assert.equal(await worker.evaluate(() => __authFixture.requests.filter(r => r.grant === 'authorization_code').length), 1);
   });
   await check('stored credentials renew once after expiration and logout clears tokens', async () => {

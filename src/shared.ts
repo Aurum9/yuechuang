@@ -13,6 +13,7 @@ export type PreviewEvent = PreviewInit
   | { type: 'preview:reset' };
 export type PreviewCommand = { type: 'summary:start'; force?: boolean; automatic?: boolean; allowMultiple?: boolean } | { type: 'summary:stop' } | { type: 'summary:status' } | { type: 'preview:close' } | { type: 'preview:open-tab' } | { type: 'settings:open' };
 export interface InlinePreview { id: string; url: string }
+export const WEB_ACCESS_ORIGINS = ['https://*/*', 'http://*/*'] as const;
 export interface SettingsView { settings: Settings; hasKey: boolean; permissions: string[]; warning: string; cacheCount: number }
 // Settings messages (only options.html is trusted): settings:get, settings:save {settings,key?:string},
 // settings:test, settings:clear-cache, settings:clear-key, settings:export.

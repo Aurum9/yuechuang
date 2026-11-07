@@ -42,7 +42,7 @@ const report = {
   testHarness: {
     productionWorkerWithoutTestEntry: true, productionSourceModified: false, testCopyRestored: false,
     trustedShellFormsAndButtonClicks: true, nativeActionClickVerified: false, nativeSidePanelSurfaceVerified: false,
-    permissionBootstrap: 'Temporary test-copy manifest grants only 127.0.0.1 loopback; exact production bytes are restored and extension reloaded before feature checks.'
+    permissionBootstrap: 'The fresh profile loads a byte-identical copy of the production manifest with website access.',
   },
   notes: [
     'The packaged sidepanel.html shell runs as an extension tab with unchanged production worker. Real form and button clicks drive chat, settings, research and collection tabs.',
@@ -151,7 +151,9 @@ async function screenshotTabs(width, suffix) {
 }
 
 try {
-  await launch(productionDirectory); await openShell();
+  await fs.cp(productionDirectory, testExtension, { recursive: true });
+  assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
+  await launch(testExtension); await openShell();
   await check('manifest declares native side panel with action-open behavior, and default shell is chat with four tabs and zero calls', async () => {
     assert.equal(manifest.side_panel?.default_path, 'sidepanel.html'); assert.ok(manifest.permissions.includes('sidePanel')); assert.equal(manifest.action?.default_popup, undefined);
     assert.deepEqual(await worker.evaluate(() => chrome.sidePanel.getPanelBehavior()), { openPanelOnActionClick: true });
@@ -161,19 +163,6 @@ try {
     await shell.screenshot({ path: path.join(screenshots, 'empty-desktop.png'), fullPage: true });
     return { defaultTab: 'chat', tabCount: 4, nativeBehaviorConfigured: true, nativeToolbarClickVerified: false, shellSurface: 'extension-tab' };
   });
-  await context.close(); context = undefined;
-  await fs.cp(productionDirectory, testExtension, { recursive: true }); const manifestPath = path.join(testExtension, 'manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, host_permissions: ['http://127.0.0.1/*'] }));
-  await launch(testExtension); await fs.writeFile(manifestPath, productionManifest);
-  const browserSettings = await context.newPage(); await browserSettings.goto('chrome://extensions');
-  await browserSettings.evaluate(() => chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }));
-  await browserSettings.evaluate(id => { void chrome.developerPrivate.reload(id); }, extensionId);
-  worker = await until(async () => {
-    for (const candidate of context.serviceWorkers()) {
-      try { if (new URL(candidate.url()).hostname === extensionId && await candidate.evaluate(expected => chrome.runtime.getManifest().version === expected && chrome.runtime.getManifest().host_permissions === undefined, version)) return candidate; } catch {}
-    }
-  }, 'restored production worker unavailable');
-  await browserSettings.close(); assert.deepEqual(await hashDirectory(testExtension), testedFiles); report.testHarness.testCopyRestored = true;
   await check('actual settings switches an OAuth model with punctuation to API without website validation or model calls', async () => {
     const before = total();
     await worker.evaluate(() => chrome.storage.local.set({ webChatConfig: { provider: 'chatgptOAuth', model: 'gpt-6.1-terra' } }));
