@@ -177,7 +177,7 @@ async function errorShape(response: Response): Promise<unknown> {
   finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
 }
 
-export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void, purpose: 'chat' | 'context' = 'chat'): Promise<string> {
+export async function requireSiwcModel(signal: AbortSignal): Promise<{ model: string; accountId: string }> {
   signal.throwIfAborted();
   const view = await ensureSiwcReady();
   signal.throwIfAborted();
@@ -185,12 +185,18 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
   if (view.status.loginPending) throw new SiwcFailure('authBusy');
   if (view.status.state === 'planDenied') throw new SiwcFailure('planDenied');
   if (view.status.state === 'permissionRequired') throw new SiwcFailure('permission');
-  if (view.status.state !== 'ready') {
+  if (view.status.state !== 'ready' || !view.status.accountId) {
     if (view.status.error) throw new Error(view.status.error);
     throw new SiwcFailure('signedOut');
   }
   if (!view.status.models.some(item => item.id === view.config.model)) throw new SiwcFailure('model');
   await permissions();
+  signal.throwIfAborted();
+  return { model: view.config.model, accountId: view.status.accountId };
+}
+
+export async function requestSiwc(messages: CompletionMessage[], signal: AbortSignal, onText: (text: string) => void, onUpdate?: (update: SearchUpdate) => void, purpose: 'chat' | 'context' | 'summary' = 'chat'): Promise<string> {
+  const { model } = await requireSiwcModel(signal);
   const before = revision;
   let diagnostic: SiwcDiagnostic = { stage: 'preflight' };
   const owner = new AbortController();
@@ -212,7 +218,7 @@ export async function requestSiwc(messages: CompletionMessage[], signal: AbortSi
     onText(text);
   }, onUpdate);
   try {
-    const body = siwcRequestBody(view.config.model, messages, purpose === 'chat');
+    const body = siwcRequestBody(model, messages, purpose === 'chat');
     diagnostic.stage = 'credentials';
     const credential = await token(combined);
     combined.throwIfAborted();

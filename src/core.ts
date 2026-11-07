@@ -36,8 +36,11 @@ export async function digest(value: string): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
 }
-export async function cacheKey(url: string, text: string, settings: Settings, key: string): Promise<string> {
-  return digest(JSON.stringify([url, await digest(text), apiEndpoint(settings.baseUrl), settings.model, settings.inputBudgetTokens, await digest(key), 'zh', PROMPT_VERSION]));
+export async function cacheKey(url: string, text: string, settings: Settings, key: string, subscription?: { model: string; accountId: string }): Promise<string> {
+  const endpoint = subscription ? 'chatgptOAuth' : apiEndpoint(settings.baseUrl);
+  const model = subscription?.model ?? settings.model;
+  const scope = await digest(subscription?.accountId ?? key);
+  return digest(JSON.stringify([url, await digest(text), endpoint, model, settings.inputBudgetTokens, scope, 'zh', PROMPT_VERSION]));
 }
 export class SSEParser {
   private buffer = '';

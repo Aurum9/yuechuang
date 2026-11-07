@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS, type Article, type Settings, type SummaryProgress } from '../src/shared.ts';
 import { estimateTokens, planSummary, splitText, summarizeArticle } from '../src/summary.ts';
+import { SIWC_MAX_MESSAGE_CHARACTERS, siwcRequestBody } from '../src/siwc-protocol.ts';
 
 const config: Settings = { ...DEFAULT_SETTINGS, baseUrl: 'https://model.test/v1', model: 'unknown-custom-model', inputBudgetTokens: 4096 };
 function article(text: string): Article { return { title: '事实与更正', url: 'https://article.test/report', text, originalLength: text.length, truncated: false }; }
@@ -29,6 +30,34 @@ test('unknown tokenizer estimates retain explicit margin for multilingual input;
     assert.ok(!/[\uD800-\uDBFF]$/.test(piece));
     assert.ok(!/^[\uDC00-\uDFFF]/.test(piece));
   }
+});
+
+test('subscription summaries split at the message length limit even when the token budget fits', async () => {
+  const text = 'This sentence is part of a long report. '.repeat(1100) + 'TAIL_FACT';
+  const current = article(text);
+  const settings = { ...config, inputBudgetTokens: 128_000 };
+  assert.equal(planSummary(current, settings).strategy, 'direct');
+  const plan = planSummary(current, settings, SIWC_MAX_MESSAGE_CHARACTERS);
+  assert.equal(plan.strategy, 'sections');
+  const sections: string[] = [];
+  let requests = 0;
+  const result = await summarizeArticle(settings, '', current, new AbortController().signal, () => {}, () => {}, {
+    maxMessageCharacters: SIWC_MAX_MESSAGE_CHARACTERS,
+    async complete(input) {
+      requests++;
+      const body = siwcRequestBody('gpt-synthetic', input, false);
+      const label = '全文中的连续一段：\n';
+      const content = body.input[0].content;
+      if (content.includes(label)) {
+        sections.push(content.slice(content.indexOf(label) + label.length));
+        return '分段事实';
+      }
+      return '完整摘要';
+    },
+  });
+  assert.equal(result, '完整摘要');
+  assert.equal(requests, plan.requests);
+  assert.equal(sections.join(''), text);
 });
 
 test('a short article uses one complete request including separate description, with prompt and output room reserved', async () => {

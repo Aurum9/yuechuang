@@ -1,6 +1,6 @@
 import { allowedUrl, cacheKey, MAX_TEXT, validateSettings } from './core';
 import { generate } from './model';
-import { planSummary, summarizeArticle } from './summary';
+import { planSummary, summarizeArticle, type SummaryTransport } from './summary';
 import { clearCache, clearKey, readCache, readConfig, saveConfig, secureStorage, writeCache, type Preview } from './store';
 import type { Article, PreviewEvent, SettingsView } from './shared';
 import { cancelContextTasks, forgetSavedPhrase, initializeContextMenus } from './context-background';
@@ -11,8 +11,9 @@ import { RESEARCH_PORT } from './research-shared';
 import { trustedPage } from './trusted-page';
 import { cancelChat, initializeChat } from './chat-background';
 import { CHAT_PORT } from './chat-shared';
-import { initializeChatConnection } from './chat-connection';
-import { clearSiwcAccessToken, initializeSiwc } from './siwc-background';
+import { getChatConnectionView, initializeChatConnection } from './chat-connection';
+import { clearSiwcAccessToken, initializeSiwc, requestSiwc, requireSiwcModel } from './siwc-background';
+import { SIWC_MAX_MESSAGE_CHARACTERS } from './siwc-protocol';
 
 const FRAME_RULE = 870201;
 let preview: Preview | undefined;
@@ -24,7 +25,7 @@ let settingsQueue: Promise<unknown> = Promise.resolve();
 let scriptsQueue: Promise<unknown> = Promise.resolve();
 let operationVersion = 0;
 type State = Extract<PreviewEvent, { type: 'summary:state' }>;
-interface Task { id: string; previewId: string; identity?: string; controller: AbortController; state: State }
+interface Task { id: string; previewId: string; identity?: string; usesSubscription?: boolean; controller: AbortController; state: State }
 let task: Task | undefined;
 let state: State | undefined;
 let testController: AbortController | undefined;
@@ -40,10 +41,12 @@ initializeChatConnection({ onConfigChange: () => {
   clearSiwcAccessToken();
   cancelChat('对话连接已变化，请重新发送。');
   cancelContextTasks('模型连接已变化，当前查阅已停止。');
+  cancel('模型连接已变化，当前摘要已停止。');
 } });
 initializeSiwc({ onConfigChange: () => {
   cancelChat('ChatGPT 授权状态已变化，请重新发送。');
   cancelContextTasks('ChatGPT 授权状态已变化，当前查阅已停止。');
+  if (task?.usesSubscription) cancel('ChatGPT 授权状态已变化，当前摘要已停止。');
 } });
 
 const ready = (async () => {
@@ -226,14 +229,26 @@ async function summarize(message: { force?: boolean; automatic?: boolean; allowM
     const article = validateArticle(result.article, target.url);
     const { text: _text, ...metadata } = article;
     send({ type: 'preview:article', article: metadata });
+    await settingsQueue; checkTask(current);
+    const { config: connection } = await getChatConnectionView(); checkTask(current);
+    current.usesSubscription = connection.provider === 'chatgptOAuth';
     const { settings, key } = await readConfig(); checkTask(current);
     if (message.automatic && !settings.autoSummary) throw new Error('自动总结已关闭，可手动总结。');
-    if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置中填写接口、模型和 API Key。原网页仍可阅读。');
-    if (!(await permitted(settings.baseUrl))) throw new Error('缺少模型接口域权限，请在 Chrome 的扩展详情中检查阅窗的网站访问权限。');
-    const ck = await cacheKey(article.url, JSON.stringify(article), settings, key); checkTask(current);
+    if (!current.usesSubscription) {
+      if (!settings.baseUrl || !settings.model || !key) throw new Error('请先在设置中填写接口、模型和 API Key。原网页仍可阅读。');
+      if (!(await permitted(settings.baseUrl))) throw new Error('缺少模型接口域权限，请在 Chrome 的扩展详情中检查阅窗的网站访问权限。');
+      checkTask(current);
+    }
+    const subscription = current.usesSubscription ? await requireSiwcModel(current.controller.signal) : undefined;
+    checkTask(current);
+    const ck = await cacheKey(article.url, JSON.stringify(article), settings, key, subscription); checkTask(current);
     const cached = message.force ? undefined : (await readCache()).find(entry => entry.key === ck); checkTask(current);
     if (message.automatic && !preview!.autoEligible) throw new Error('本次自动总结已经尝试过，请手动重试。');
-    const plan = planSummary(article, settings);
+    const transport: SummaryTransport | undefined = subscription ? {
+      maxMessageCharacters: SIWC_MAX_MESSAGE_CHARACTERS,
+      complete: (input, signal, onText) => requestSiwc(input, signal, onText, undefined, 'summary'),
+    } : undefined;
+    const plan = planSummary(article, settings, transport?.maxMessageCharacters);
     if (cached) {
       preview!.autoEligible = false;
       send({ type: 'summary:plan', plan: { ...plan, requests: 0 }, needsConfirmation: false });
@@ -250,7 +265,8 @@ async function summarize(message: { force?: boolean; automatic?: boolean; allowM
     await persist(); checkTask(current);
     const text = await summarizeArticle(settings, key, article, current.controller.signal, text => {
       if (task === current && identity() === current.identity) { state = current.state = { ...current.state, text }; send(state); }
-    }, progress => { if (task === current && identity() === current.identity) send({ type: 'summary:progress', progress }); });
+    }, progress => { if (task === current && identity() === current.identity) send({ type: 'summary:progress', progress }); },
+    transport);
     checkTask(current);
     if (identity() !== current.identity) return;
     await writeCache(ck, text); checkTask(current);

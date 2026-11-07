@@ -64,7 +64,8 @@ async function installFixture(target) {
           request.body = body;
           request.authorized = init.headers.Authorization === 'Bearer e2e-synthetic-access';
           const answer = body.instructions?.includes('双语例句') ? 'This product is useful. 这个产品很实用。'
-            : body.instructions?.includes('将选区完整译为') ? '产品' : '纯扩展测试回答';
+            : body.instructions?.includes('将选区完整译为') ? '产品'
+              : body.instructions?.includes('中文摘要') ? '纯扩展测试摘要' : '纯扩展测试回答';
           return new Response([
             { type: 'response.output_text.delta', delta: answer },
             { type: 'response.completed', response: { status: 'completed' } },
@@ -102,7 +103,12 @@ try {
       callback.search = new URLSearchParams({ state: url.searchParams.get('state'), code: 'e2e-synthetic-code', client_id: 'oaiapp_synthetic' });
       return route.fulfill({ contentType: 'text/html', body: `<title>Synthetic authorization</title><a id="approve" href="${callback.href.replaceAll('&', '&amp;')}">Approve synthetic account</a>` });
     }
-    if (url.origin === 'https://fixture.example') return route.fulfill({ contentType: 'text/html', body: '<title>Reading fixture</title><p>This <span id="selection-word">product</span> helps the reader.</p>' });
+    if (url.origin === 'https://fixture.example') {
+      const body = url.pathname === '/article'
+        ? '<title>Preview article</title><article><p>' + 'PREVIEW_SUMMARY_FACT: The report describes the results of a reading study and its limitations. '.repeat(8) + '</p></article>'
+        : '<title>Reading fixture</title><p>This <span id="selection-word">product</span> helps the reader.</p><p><a id="article-link" href="/article">Open the full reading study report</a></p>';
+      return route.fulfill({ contentType: 'text/html', body });
+    }
     // A loopback redirect is expected. No real helper or listener is started.
     if (url.origin === 'http://127.0.0.1:1455') return route.abort('connectionrefused');
     report.unexpectedNetwork.push({ origin: url.origin, path: url.pathname }); return route.abort();
@@ -181,6 +187,42 @@ try {
         assert.equal(JSON.parse(request.body.input[0].content).selection, 'product');
       }
       assert.equal(JSON.parse(requests[1].body.input[0].content).existingCoreAnswer, '产品');
+    } finally { await page.close(); }
+  });
+  await check('link preview generates and reuses a subscription summary without an API Key', async () => {
+    assert.equal((await rpc('settings:get')).hasKey, false);
+    const before = await worker.evaluate(() => __authFixture.requests.length);
+    const page = await context.newPage();
+    const preview = page.locator('local-reader-preview');
+    const action = name => preview.locator(`[data-reader-action="${name}"]`);
+    try {
+      await page.goto('https://fixture.example/');
+      for (const useCache of [false, true]) {
+        const box = await page.locator('#article-link').boundingBox();
+        assert.ok(box);
+        await page.mouse.move(box.x + 20, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(box.x + 90, box.y + box.height / 2 + 22, { steps: 14 });
+        await preview.waitFor();
+        await page.mouse.up();
+        await preview.locator('.page-status[data-state="ready"]').waitFor();
+        await action('summarize').click();
+        const status = preview.locator('.status[data-phase="done"]');
+        await status.waitFor();
+        assert.equal(await preview.locator('[data-reader-output]').innerText(), '纯扩展测试摘要');
+        assert.equal((await status.innerText()).includes('缓存'), useCache);
+        await action('close').click();
+        await preview.waitFor({ state: 'detached' });
+      }
+      const requests = await worker.evaluate(before => __authFixture.requests.slice(before), before);
+      assert.equal(requests.length, 1);
+      const [request] = requests;
+      assert.equal(request.path, '/v1/responses');
+      assert.equal(request.authorized, true);
+      assert.equal(request.body.model, 'gpt-synthetic');
+      assert.equal(request.body.store, false);
+      assert.equal(request.body.tools, undefined);
+      assert.match(request.body.input[0].content, /PREVIEW_SUMMARY_FACT/);
     } finally { await page.close(); }
   });
   await check('real worker termination retains pending PKCE and completes the original callback after restart', async () => {

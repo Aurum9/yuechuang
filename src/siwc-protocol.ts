@@ -40,11 +40,13 @@ export function parseSiwcModels(value: unknown): WebChatModel[] {
   if (!result.length) throw new SiwcFailure('model', 'modelCatalog');
   return result;
 }
+export const SIWC_MAX_MESSAGE_CHARACTERS = 40_000;
+
 export function siwcRequestBody(model: string, messages: CompletionMessage[], webSearch = true) {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(model) || !Array.isArray(messages) || !messages.length || messages.length > 41) throw new SiwcFailure('format', 'requestInvalid');
   let total = 0;
   for (const item of messages) {
-    if (!record(item) || !['system', 'user', 'assistant'].includes(String(item.role)) || typeof item.content !== 'string' || !item.content.trim() || item.content.length > 40_000) throw new SiwcFailure('format', 'requestInvalid');
+    if (!record(item) || !['system', 'user', 'assistant'].includes(String(item.role)) || typeof item.content !== 'string' || !item.content.trim() || item.content.length > SIWC_MAX_MESSAGE_CHARACTERS) throw new SiwcFailure('format', 'requestInvalid');
     total += item.content.length;
   }
   if (total > 240_000 || messages.at(-1)?.role !== 'user') throw new SiwcFailure('format', 'requestInvalid');
